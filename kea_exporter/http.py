@@ -1,3 +1,4 @@
+from sys import modules
 import requests
 
 from kea_exporter import DHCPVersion
@@ -31,9 +32,18 @@ class KeaHTTPClient:
             headers={"Content-Type": "application/json"},
         )
         config = r.json()
-        for module in config[0]["arguments"]["Control-agent"]["control-sockets"]:
-            if "dhcp" in module:  # Does not support d2 metrics. # Does not handle ctrl sockets that are offline
-                self.modules.append(module)
+        config_args = config[0].get("arguments", {})
+
+        # Try Control Agent discovery first (legacy)
+        modules = config_args.get("Control-agent", {}).get("control-sockets", [])
+
+        # Fallback for setups without Control Agent (Kea 2.7.2+ and newer may not have it)
+        if not modules:
+            # Normalize keys to lowercase for case-insensitive detection
+            lower_args = {k.lower(): v for k, v in config_args.items()}
+            for service in ["dhcp4", "dhcp6"]:
+                if service in lower_args:
+                    self.modules.append(service)
 
     def load_subnets(self):
         r = requests.post(
