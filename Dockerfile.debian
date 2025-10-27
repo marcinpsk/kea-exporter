@@ -7,7 +7,7 @@ LABEL org.opencontainers.image.url=https://github.com/marcinpsk/kea-exporter
 LABEL org.opencontainers.image.licenses=MIT
 
 # Create user - not fixing UID/GID to allow flexibility, we don't mount volumes needing specific ownership
-RUN addgroup --system kea-exporter && adduser --system --ingroup kea-exporter kea-exporter
+RUN addgroup --system kea-exporter && useradd -m --system -g kea-exporter kea-exporter
 
 ENV PATH="/home/kea-exporter/.local/bin:${PATH}"
 
@@ -17,7 +17,7 @@ WORKDIR /usr/src/app
 RUN chown -R kea-exporter:kea-exporter /usr/src/app
 
 # Run container as non-root
-USER kea-exporter
+USER kea-exporter:kea-exporter
 
 COPY pyproject.toml README.rst pdm.lock ./
 COPY kea_exporter ./kea_exporter
