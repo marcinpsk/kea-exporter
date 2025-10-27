@@ -7,7 +7,7 @@ LABEL org.opencontainers.image.url=https://github.com/marcinpsk/kea-exporter
 LABEL org.opencontainers.image.licenses=MIT
 
 # Create user - not fixing UID/GID to allow flexibility, we don't mount volumes needing specific ownership
-RUN addgroup -S kea-exporter && adduser -S -G kea-exporter kea-exporter
+RUN addgroup --system kea-exporter && adduser --system --ingroup kea-exporter kea-exporter
 
 ENV PATH="/home/kea-exporter/.local/bin:${PATH}"
 
