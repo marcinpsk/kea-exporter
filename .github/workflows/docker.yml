@@ -1,7 +1,8 @@
 name: Create and publish a Docker image
 on:
+  workflow_dispatch:
   push:
-    tags: ["*"]
+    tags: ["v*"]
 
 env:
   REGISTRY: ghcr.io
@@ -27,15 +28,36 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
           platforms: linux/amd64,linux/arm64
-      - name: Build and push Docker image
+
+      - name: Build and push Alpine image
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: Dockerfile.alpine # python3.12-alpine Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-alpine
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-alpine
+
+      - name: Build and push Debian image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.debian #  python3.12-slim Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-debian
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-debian
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
