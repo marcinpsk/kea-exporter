@@ -1,14 +1,39 @@
 from sys import modules
+from urllib.parse import urlparse, urlunparse
 import requests
 
 from kea_exporter import DHCPVersion
 
 
 class KeaHTTPClient:
-    def __init__(self, target, client_cert, client_key, **kwargs):
+    def __init__(self, target, client_cert, client_key, timeout=10, **kwargs):
         super().__init__()
 
-        self._target = target
+        # Parse URL to extract credentials
+        parsed = urlparse(target)
+
+        # Extract basic auth from URL if present
+        if parsed.username and parsed.password:
+            self._auth = (parsed.username, parsed.password)
+            # Remove credentials from URL for actual requests and server ID
+            netloc_without_auth = parsed.hostname
+            if parsed.port:
+                netloc_without_auth = f"{netloc_without_auth}:{parsed.port}"
+            self._target = urlunparse((
+                parsed.scheme,
+                netloc_without_auth,
+                parsed.path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment
+            ))
+            # Use clean URL (without credentials) as server identifier
+            self._server_id = self._target
+        else:
+            self._target = target
+            self._server_id = target
+            self._auth = None
+
         if client_cert and client_key:
             self._cert = (
                 client_cert,
@@ -17,6 +42,7 @@ class KeaHTTPClient:
         else:
             self._cert = None
 
+        self.timeout = timeout
         self.modules = []
         self.subnets = {}
         self.subnets6 = {}
@@ -28,8 +54,10 @@ class KeaHTTPClient:
         r = requests.post(
             self._target,
             cert=self._cert,
+            auth=self._auth,
             json={"command": "config-get"},
             headers={"Content-Type": "application/json"},
+            timeout=self.timeout,
         )
         config = r.json()
         config_args = config[0].get("arguments", {})
@@ -41,16 +69,27 @@ class KeaHTTPClient:
         if not modules:
             # Normalize keys to lowercase for case-insensitive detection
             lower_args = {k.lower(): v for k, v in config_args.items()}
-            for service in ["dhcp4", "dhcp6"]:
+            for service in ["dhcp4", "dhcp6", "ddns", "d2"]:
                 if service in lower_args:
-                    self.modules.append(service)
+                    # Normalize d2 to ddns
+                    if service == "d2":
+                        self.modules.append("ddns")
+                    else:
+                        self.modules.append(service)
 
     def load_subnets(self):
+        # Only load subnets for DHCP services (DDNS doesn't have subnets)
+        dhcp_modules = [m for m in self.modules if m in ["dhcp4", "dhcp6"]]
+        if not dhcp_modules:
+            return
+
         r = requests.post(
             self._target,
             cert=self._cert,
-            json={"command": "config-get", "service": self.modules},
+            auth=self._auth,
+            json={"command": "config-get", "service": dhcp_modules},
             headers={"Content-Type": "application/json"},
+            timeout=self.timeout,
         )
         config = r.json()
         for module in config:
@@ -66,12 +105,14 @@ class KeaHTTPClient:
         r = requests.post(
             self._target,
             cert=self._cert,
+            auth=self._auth,
             json={
                 "command": "statistic-get-all",
                 "arguments": {},
                 "service": self.modules,
             },
             headers={"Content-Type": "application/json"},
+            timeout=self.timeout,
         )
         response = r.json()
 
@@ -82,9 +123,12 @@ class KeaHTTPClient:
             elif module == "dhcp6":
                 dhcp_version = DHCPVersion.DHCP6
                 subnets = self.subnets6
+            elif module == "ddns":
+                dhcp_version = DHCPVersion.DDNS
+                subnets = {}  # DDNS doesn't have subnets
             else:
                 continue
 
             arguments = response[index].get("arguments", {})
 
-            yield dhcp_version, arguments, subnets
+            yield self._server_id, dhcp_version, arguments, subnets

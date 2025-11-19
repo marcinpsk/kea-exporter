@@ -59,6 +59,13 @@ class Timer:
     help="Path to client key used in HTTP requests",
     required=False,
 )
+@click.option(
+    "--timeout",
+    envvar="TIMEOUT",
+    type=int,
+    default=10,
+    help="Timeout for HTTP requests in seconds.",
+)
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
 @click.version_option(prog_name=__project__, version=__version__)
 def cli(port, address, interval, **kwargs):

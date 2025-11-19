@@ -18,6 +18,7 @@ class KeaSocketClient:
             raise PermissionError(f"No read/write permissions on Unix domain socket at {sock_path}")
 
         self.sock_path = os.path.abspath(sock_path)
+        self._server_id = self.sock_path  # Use socket path as server identifier
 
         self.version = None
         self.config = None
@@ -43,7 +44,7 @@ class KeaSocketClient:
 
         arguments = self.query("statistic-get-all").get("arguments", {})
 
-        yield self.dhcp_version, arguments, self.subnets
+        yield self._server_id, self.dhcp_version, arguments, self.subnets
 
     def reload(self):
         self.config = self.query("config-get")["arguments"]

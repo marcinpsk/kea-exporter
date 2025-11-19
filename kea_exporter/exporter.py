@@ -33,6 +33,11 @@ class Exporter:
         self.metrics_dhcp6_subnet_ignore = None
         self.setup_dhcp6_metrics()
 
+        self.metrics_ddns = None
+        self.metrics_ddns_map = None
+        self.ddns_key_pattern = None
+        self.setup_ddns_metrics()
+
         # track unhandled metric keys, to notify only once
         self.unhandled_metrics = set()
 
@@ -68,17 +73,18 @@ class Exporter:
     def setup_dhcp4_metrics(self):
         self.metrics_dhcp4 = {
             # Packets
-            "sent_packets": Gauge(f"{self.prefix_dhcp4}_packets_sent_total", "Packets sent", ["operation"]),
+            "sent_packets": Gauge(f"{self.prefix_dhcp4}_packets_sent_total", "Packets sent", ["server", "operation"]),
             "received_packets": Gauge(
                 f"{self.prefix_dhcp4}_packets_received_total",
                 "Packets received",
-                ["operation"],
+                ["server", "operation"],
             ),
             # per Subnet or Subnet pool
             "addresses_allocation_fail": Gauge(
                 f"{self.prefix_dhcp4}_allocations_failed_total",
                 "Allocation fail count",
                 [
+                    "server",
                     "subnet",
                     "subnet_id",
                     "context",
@@ -87,37 +93,37 @@ class Exporter:
             "addresses_assigned_total": Gauge(
                 f"{self.prefix_dhcp4}_addresses_assigned_total",
                 "Assigned addresses",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "addresses_declined_total": Gauge(
                 f"{self.prefix_dhcp4}_addresses_declined_total",
                 "Declined counts",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "addresses_declined_reclaimed_total": Gauge(
                 f"{self.prefix_dhcp4}_addresses_declined_reclaimed_total",
                 "Declined addresses that were reclaimed",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "addresses_reclaimed_total": Gauge(
                 f"{self.prefix_dhcp4}_addresses_reclaimed_total",
                 "Expired addresses that were reclaimed",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "addresses_total": Gauge(
                 f"{self.prefix_dhcp4}_addresses_total",
                 "Size of subnet address pool",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "reservation_conflicts_total": Gauge(
                 f"{self.prefix_dhcp4}_reservation_conflicts_total",
                 "Reservation conflict count",
-                ["subnet", "subnet_id"],
+                ["server", "subnet", "subnet_id"],
             ),
             "leases_reused_total": Gauge(
                 f"{self.prefix_dhcp4}_leases_reused_total",
                 "Number of times an IPv4 lease has been renewed in memory",
-                ["subnet", "subnet_id"],
+                ["server", "subnet", "subnet_id"],
             ),
         }
 
@@ -246,28 +252,29 @@ class Exporter:
     def setup_dhcp6_metrics(self):
         self.metrics_dhcp6 = {
             # Packets sent/received
-            "sent_packets": Gauge(f"{self.prefix_dhcp6}_packets_sent_total", "Packets sent", ["operation"]),
+            "sent_packets": Gauge(f"{self.prefix_dhcp6}_packets_sent_total", "Packets sent", ["server", "operation"]),
             "received_packets": Gauge(
                 f"{self.prefix_dhcp6}_packets_received_total",
                 "Packets received",
-                ["operation"],
+                ["server", "operation"],
             ),
             # DHCPv4-over-DHCPv6
             "sent_dhcp4_packets": Gauge(
                 f"{self.prefix_dhcp6}_packets_sent_dhcp4_total",
                 "DHCPv4-over-DHCPv6 Packets received",
-                ["operation"],
+                ["server", "operation"],
             ),
             "received_dhcp4_packets": Gauge(
                 f"{self.prefix_dhcp6}_packets_received_dhcp4_total",
                 "DHCPv4-over-DHCPv6 Packets received",
-                ["operation"],
+                ["server", "operation"],
             ),
             # per Subnet or pool
             "addresses_allocation_fail": Gauge(
                 f"{self.prefix_dhcp6}_allocations_failed_total",
                 "Allocation fail count",
                 [
+                    "server",
                     "subnet",
                     "subnet_id",
                     "context",
@@ -276,50 +283,50 @@ class Exporter:
             "addresses_declined_total": Gauge(
                 f"{self.prefix_dhcp6}_addresses_declined_total",
                 "Declined addresses",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "addresses_declined_reclaimed_total": Gauge(
                 f"{self.prefix_dhcp6}_addresses_declined_reclaimed_total",
                 "Declined addresses that were reclaimed",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "addresses_reclaimed_total": Gauge(
                 f"{self.prefix_dhcp6}_addresses_reclaimed_total",
                 "Expired addresses that were reclaimed",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "reservation_conflicts_total": Gauge(
                 f"{self.prefix_dhcp6}_reservation_conflicts_total",
                 "Reservation conflict count",
-                ["subnet", "subnet_id"],
+                ["server", "subnet", "subnet_id"],
             ),
             # IA_NA
             "na_assigned_total": Gauge(
                 f"{self.prefix_dhcp6}_na_assigned_total",
                 "Assigned non-temporary addresses (IA_NA)",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "na_total": Gauge(
                 f"{self.prefix_dhcp6}_na_total",
                 "Size of non-temporary address pool",
-                ["subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id", "pool"],
             ),
             "na_reuses_total": Gauge(
-                f"{self.prefix_dhcp6}_na_reuses_total", "Number of IA_NA lease reuses", ["subnet", "subnet_id", "pool"]
+                f"{self.prefix_dhcp6}_na_reuses_total", "Number of IA_NA lease reuses", ["server", "subnet", "subnet_id", "pool"]
             ),
             # IA_PD
             "pd_assigned_total": Gauge(
                 f"{self.prefix_dhcp6}_pd_assigned_total",
                 "Assigned prefix delegations (IA_PD)",
-                ["subnet", "subnet_id"],
+                ["server", "subnet", "subnet_id"],
             ),
             "pd_total": Gauge(
                 f"{self.prefix_dhcp6}_pd_total",
                 "Size of prefix delegation pool",
-                ["subnet", "subnet_id"],
+                ["server", "subnet", "subnet_id"],
             ),
             "pd_reuses_total": Gauge(
-                f"{self.prefix_dhcp6}_pd_reuses_total", "Number of IA_PD lease reuses", ["subnet", "subnet_id", "pool"]
+                f"{self.prefix_dhcp6}_pd_reuses_total", "Number of IA_PD lease reuses", ["server", "subnet", "subnet_id", "pool"]
             ),
         }
 
@@ -472,7 +479,44 @@ class Exporter:
             "v6-allocation-fail",
         ]
 
-    def parse_metrics(self, dhcp_version, arguments, subnets):
+    def setup_ddns_metrics(self):
+        self.prefix_ddns = f"{self.prefix}_ddns"
+        self.metrics_ddns = {
+            # Global DDNS metrics
+            "ncr_error": Gauge(f"{self.prefix_ddns}_ncr_error_total", "NCR processing errors", ["server"]),
+            "ncr_invalid": Gauge(f"{self.prefix_ddns}_ncr_invalid_total", "Invalid NCRs received", ["server"]),
+            "ncr_received": Gauge(f"{self.prefix_ddns}_ncr_received_total", "NCRs received", ["server"]),
+            "queue_full": Gauge(f"{self.prefix_ddns}_queue_full_total", "Queue manager queue full", ["server"]),
+            "update_error": Gauge(f"{self.prefix_ddns}_update_error_total", "Update errors", ["server"]),
+            "update_sent": Gauge(f"{self.prefix_ddns}_update_sent_total", "Updates sent", ["server"]),
+            "update_signed": Gauge(f"{self.prefix_ddns}_update_signed_total", "Updates signed", ["server"]),
+            "update_success": Gauge(f"{self.prefix_ddns}_update_success_total", "Successful updates", ["server"]),
+            "update_timeout": Gauge(f"{self.prefix_ddns}_update_timeout_total", "Update timeouts", ["server"]),
+            "update_unsigned": Gauge(f"{self.prefix_ddns}_update_unsigned_total", "Updates unsigned", ["server"]),
+            # Per-key metrics
+            "key_update_error": Gauge(f"{self.prefix_ddns}_key_update_error_total", "Per-key update errors", ["server", "key"]),
+            "key_update_sent": Gauge(f"{self.prefix_ddns}_key_update_sent_total", "Per-key updates sent", ["server", "key"]),
+            "key_update_success": Gauge(f"{self.prefix_ddns}_key_update_success_total", "Per-key successful updates", ["server", "key"]),
+            "key_update_timeout": Gauge(f"{self.prefix_ddns}_key_update_timeout_total", "Per-key update timeouts", ["server", "key"]),
+        }
+
+        self.metrics_ddns_map = {
+            "ncr-error": {"metric": "ncr_error"},
+            "ncr-invalid": {"metric": "ncr_invalid"},
+            "ncr-received": {"metric": "ncr_received"},
+            "queue-mgr-queue-full": {"metric": "queue_full"},
+            "update-error": {"metric": "update_error"},
+            "update-sent": {"metric": "update_sent"},
+            "update-signed": {"metric": "update_signed"},
+            "update-success": {"metric": "update_success"},
+            "update-timeout": {"metric": "update_timeout"},
+            "update-unsigned": {"metric": "update_unsigned"},
+        }
+
+        # Pattern to match per-key metrics: key[domain.name.].metric-name
+        self.ddns_key_pattern = re.compile(r"^key\[(?P<key>[^\]]+)\]\.(?P<metric>.+)$")
+
+    def parse_metrics(self, server, dhcp_version, arguments, subnets):
         for key, data in arguments.items():
             if dhcp_version is DHCPVersion.DHCP4:
                 if key in self.metrics_dhcp4_global_ignore:
@@ -480,11 +524,14 @@ class Exporter:
             elif dhcp_version is DHCPVersion.DHCP6:
                 if key in self.metrics_dhcp6_global_ignore:
                     continue
+            elif dhcp_version is DHCPVersion.DDNS:
+                # DDNS metrics are processed separately below
+                pass
             else:
                 continue
 
             value, _ = data[0]
-            labels = {}
+            labels = {"server": server}
 
             subnet_match = self.subnet_pattern.match(key)
             if subnet_match:
@@ -550,6 +597,44 @@ class Exporter:
             elif dhcp_version is DHCPVersion.DHCP6:
                 metrics_map = self.metrics_dhcp6_map
                 metrics = self.metrics_dhcp6
+            elif dhcp_version is DHCPVersion.DDNS:
+                # Handle DDNS metrics
+                # Check for per-key metrics first
+                key_match = self.ddns_key_pattern.match(key)
+                if key_match:
+                    key_name = key_match.group("key")
+                    metric_name = key_match.group("metric")
+
+                    # Map metric name to our per-key metrics
+                    if metric_name == "update-error":
+                        metric = self.metrics_ddns["key_update_error"]
+                        labels["key"] = key_name
+                    elif metric_name == "update-sent":
+                        metric = self.metrics_ddns["key_update_sent"]
+                        labels["key"] = key_name
+                    elif metric_name == "update-success":
+                        metric = self.metrics_ddns["key_update_success"]
+                        labels["key"] = key_name
+                    elif metric_name == "update-timeout":
+                        metric = self.metrics_ddns["key_update_timeout"]
+                        labels["key"] = key_name
+                    else:
+                        # Unknown per-key metric
+                        if key not in self.unhandled_metrics:
+                            click.echo(
+                                f"Unhandled DDNS per-key metric '{key}' please file an issue at https://github.com/marcinpsk/kea-exporter"
+                            )
+                            self.unhandled_metrics.add(key)
+                        continue
+
+                    # Filter labels and set metric
+                    labels = {k: v for k, v in labels.items() if k in metric._labelnames}
+                    metric.labels(**labels).set(value)
+                    continue
+
+                # Handle global DDNS metrics
+                metrics_map = self.metrics_ddns_map
+                metrics = self.metrics_ddns
             else:
                 continue
 
@@ -558,7 +643,7 @@ class Exporter:
             except KeyError:
                 if key not in self.unhandled_metrics:
                     click.echo(
-                        f"Unhandled metric '{key}' please file an issue at https://github.com/mweinelt/kea-exporter"
+                        f"Unhandled metric '{key}' please file an issue at https://github.com/marcinpsk/kea-exporter"
                     )
                     self.unhandled_metrics.add(key)
                 continue
