@@ -472,17 +472,6 @@ class Exporter:
             "v6-allocation-fail",
         ]
 
-<<<<<<< HEAD
-    def parse_metrics(self, dhcp_version, arguments, subnets):
-        for key, data in arguments.items():
-            if dhcp_version is DHCPVersion.DHCP4:
-                if key in self.metrics_dhcp4_global_ignore:
-                    continue
-            elif dhcp_version is DHCPVersion.DHCP6:
-                if key in self.metrics_dhcp6_global_ignore:
-                    continue
-            else:
-=======
     def setup_ddns_metrics(self):
         self.prefix_ddns = f"{self.prefix}_ddns"
         self.metrics_ddns = {
@@ -543,7 +532,6 @@ class Exporter:
         for key, data in arguments.items():
             # Check global ignore list
             if key in global_ignore:
->>>>>>> dd28843 (added basic auth, server labels, reworked Dockerfiles)
                 continue
 
             value, _ = data[0]
@@ -596,17 +584,6 @@ class Exporter:
                     key = subnet_metric
                     labels["pool"] = ""
 
-<<<<<<< HEAD
-            if dhcp_version is DHCPVersion.DHCP4:
-                metrics_map = self.metrics_dhcp4_map
-                metrics = self.metrics_dhcp4
-            elif dhcp_version is DHCPVersion.DHCP6:
-                metrics_map = self.metrics_dhcp6_map
-                metrics = self.metrics_dhcp6
-            else:
-                continue
-
-=======
             # Handle DDNS per-key metrics (special case)
             if dhcp_version is DHCPVersion.DDNS:
                 key_match = self.ddns_key_pattern.match(key)
@@ -642,7 +619,6 @@ class Exporter:
                     continue
 
             # Handle standard metrics
->>>>>>> dd28843 (added basic auth, server labels, reworked Dockerfiles)
             try:
                 metric_info = metrics_map[key]
             except KeyError:
