@@ -472,6 +472,7 @@ class Exporter:
             "v6-allocation-fail",
         ]
 
+<<<<<<< HEAD
     def parse_metrics(self, dhcp_version, arguments, subnets):
         for key, data in arguments.items():
             if dhcp_version is DHCPVersion.DHCP4:
@@ -481,6 +482,68 @@ class Exporter:
                 if key in self.metrics_dhcp6_global_ignore:
                     continue
             else:
+=======
+    def setup_ddns_metrics(self):
+        self.prefix_ddns = f"{self.prefix}_ddns"
+        self.metrics_ddns = {
+            # Global DDNS metrics
+            "ncr_error": Gauge(f"{self.prefix_ddns}_ncr_error_total", "NCR processing errors", ["server"]),
+            "ncr_invalid": Gauge(f"{self.prefix_ddns}_ncr_invalid_total", "Invalid NCRs received", ["server"]),
+            "ncr_received": Gauge(f"{self.prefix_ddns}_ncr_received_total", "NCRs received", ["server"]),
+            "queue_full": Gauge(f"{self.prefix_ddns}_queue_full_total", "Queue manager queue full", ["server"]),
+            "update_error": Gauge(f"{self.prefix_ddns}_update_error_total", "Update errors", ["server"]),
+            "update_sent": Gauge(f"{self.prefix_ddns}_update_sent_total", "Updates sent", ["server"]),
+            "update_signed": Gauge(f"{self.prefix_ddns}_update_signed_total", "Updates signed", ["server"]),
+            "update_success": Gauge(f"{self.prefix_ddns}_update_success_total", "Successful updates", ["server"]),
+            "update_timeout": Gauge(f"{self.prefix_ddns}_update_timeout_total", "Update timeouts", ["server"]),
+            "update_unsigned": Gauge(f"{self.prefix_ddns}_update_unsigned_total", "Updates unsigned", ["server"]),
+            # Per-key metrics
+            "key_update_error": Gauge(f"{self.prefix_ddns}_key_update_error_total", "Per-key update errors", ["server", "key"]),
+            "key_update_sent": Gauge(f"{self.prefix_ddns}_key_update_sent_total", "Per-key updates sent", ["server", "key"]),
+            "key_update_success": Gauge(f"{self.prefix_ddns}_key_update_success_total", "Per-key successful updates", ["server", "key"]),
+            "key_update_timeout": Gauge(f"{self.prefix_ddns}_key_update_timeout_total", "Per-key update timeouts", ["server", "key"]),
+        }
+
+        self.metrics_ddns_map = {
+            "ncr-error": {"metric": "ncr_error"},
+            "ncr-invalid": {"metric": "ncr_invalid"},
+            "ncr-received": {"metric": "ncr_received"},
+            "queue-mgr-queue-full": {"metric": "queue_full"},
+            "update-error": {"metric": "update_error"},
+            "update-sent": {"metric": "update_sent"},
+            "update-signed": {"metric": "update_signed"},
+            "update-success": {"metric": "update_success"},
+            "update-timeout": {"metric": "update_timeout"},
+            "update-unsigned": {"metric": "update_unsigned"},
+        }
+
+        # Pattern to match per-key metrics: key[domain.name.].metric-name
+        self.ddns_key_pattern = re.compile(r"^key\[(?P<key>[^\]]+)\]\.(?P<metric>.+)$")
+
+    def parse_metrics(self, server, dhcp_version, arguments, subnets):
+        # Determine configuration based on DHCP version
+        if dhcp_version is DHCPVersion.DHCP4:
+            metrics_map = self.metrics_dhcp4_map
+            metrics = self.metrics_dhcp4
+            global_ignore = self.metrics_dhcp4_global_ignore
+            subnet_ignore = self.metric_dhcp4_subnet_ignore
+        elif dhcp_version is DHCPVersion.DHCP6:
+            metrics_map = self.metrics_dhcp6_map
+            metrics = self.metrics_dhcp6
+            global_ignore = self.metrics_dhcp6_global_ignore
+            subnet_ignore = self.metric_dhcp6_subnet_ignore
+        elif dhcp_version is DHCPVersion.DDNS:
+            metrics_map = self.metrics_ddns_map
+            metrics = self.metrics_ddns
+            global_ignore = []
+            subnet_ignore = []
+        else:
+            return
+
+        for key, data in arguments.items():
+            # Check global ignore list
+            if key in global_ignore:
+>>>>>>> dd28843 (added basic auth, server labels, reworked Dockerfiles)
                 continue
 
             value, _ = data[0]
@@ -493,19 +556,8 @@ class Exporter:
                 pool_metric = subnet_match.group("pool_metric")
                 subnet_metric = subnet_match.group("subnet_metric")
 
-                if dhcp_version is DHCPVersion.DHCP4:
-                    if (
-                        pool_metric in self.metric_dhcp4_subnet_ignore
-                        or subnet_metric in self.metric_dhcp4_subnet_ignore
-                    ):
-                        continue
-                elif dhcp_version is DHCPVersion.DHCP6:
-                    if (
-                        pool_metric in self.metric_dhcp6_subnet_ignore
-                        or subnet_metric in self.metric_dhcp6_subnet_ignore
-                    ):
-                        continue
-                else:
+                # Check subnet ignore list
+                if pool_metric in subnet_ignore or subnet_metric in subnet_ignore:
                     continue
 
                 subnet_data = subnets.get(subnet_id, [])
@@ -544,6 +596,7 @@ class Exporter:
                     key = subnet_metric
                     labels["pool"] = ""
 
+<<<<<<< HEAD
             if dhcp_version is DHCPVersion.DHCP4:
                 metrics_map = self.metrics_dhcp4_map
                 metrics = self.metrics_dhcp4
@@ -553,6 +606,43 @@ class Exporter:
             else:
                 continue
 
+=======
+            # Handle DDNS per-key metrics (special case)
+            if dhcp_version is DHCPVersion.DDNS:
+                key_match = self.ddns_key_pattern.match(key)
+                if key_match:
+                    key_name = key_match.group("key")
+                    metric_name = key_match.group("metric")
+
+                    # Map metric name to our per-key metrics
+                    if metric_name == "update-error":
+                        metric = self.metrics_ddns["key_update_error"]
+                        labels["key"] = key_name
+                    elif metric_name == "update-sent":
+                        metric = self.metrics_ddns["key_update_sent"]
+                        labels["key"] = key_name
+                    elif metric_name == "update-success":
+                        metric = self.metrics_ddns["key_update_success"]
+                        labels["key"] = key_name
+                    elif metric_name == "update-timeout":
+                        metric = self.metrics_ddns["key_update_timeout"]
+                        labels["key"] = key_name
+                    else:
+                        # Unknown per-key metric
+                        if key not in self.unhandled_metrics:
+                            click.echo(
+                                f"Unhandled DDNS per-key metric '{key}' please file an issue at https://github.com/marcinpsk/kea-exporter"
+                            )
+                            self.unhandled_metrics.add(key)
+                        continue
+
+                    # Filter labels and set metric
+                    labels = {k: v for k, v in labels.items() if k in metric._labelnames}
+                    metric.labels(**labels).set(value)
+                    continue
+
+            # Handle standard metrics
+>>>>>>> dd28843 (added basic auth, server labels, reworked Dockerfiles)
             try:
                 metric_info = metrics_map[key]
             except KeyError:
