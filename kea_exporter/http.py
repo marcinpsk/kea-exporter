@@ -7,6 +7,17 @@ from kea_exporter import DHCPVersion
 
 class KeaHTTPClient:
     def __init__(self, target, client_cert, client_key, timeout=10, **kwargs):
+        """
+        Initialize the KeaHTTPClient and configure connection details.
+        
+        Parses the provided target URL and, if username and password are embedded, extracts them for use as HTTP basic auth while storing a cleaned target URL (without credentials) as the client target and server identifier. Stores optional client certificate and key, sets the request timeout, and initializes internal module and subnet caches. Finally, discovers available modules and loads subnet data.
+        
+        Parameters:
+            target (str): URL of the Kea server; may include embedded credentials (e.g., "https://user:pass@host:port").
+            client_cert (str | None): Path to the client certificate file, or None to skip mutual TLS.
+            client_key (str | None): Path to the client key file, or None to skip mutual TLS.
+            timeout (int | float): HTTP request timeout in seconds (default 10).
+        """
         super().__init__()
 
         # Parse URL to extract credentials
@@ -51,6 +62,15 @@ class KeaHTTPClient:
         self.load_subnets()
 
     def load_modules(self):
+        """
+        Discover available Kea services and populate self.modules.
+        
+        Sends a configuration query to the Kea server, reads the returned configuration
+        arguments, and populates the instance's `modules` list. Prefers legacy Control
+        Agent discovery via the `Control-agent.control-sockets` entry; if absent,
+        performs a case-insensitive inspection of top-level service keys and adds any
+        of `dhcp4`, `dhcp6`, or `ddns` (treating `d2` as `ddns`).
+        """
         r = requests.post(
             self._target,
             cert=self._cert,
@@ -79,6 +99,11 @@ class KeaHTTPClient:
 
     def load_subnets(self):
         # Only load subnets for DHCP services (DDNS doesn't have subnets)
+        """
+        Load IPv4 and IPv6 subnet definitions from the server configuration and store them on the instance.
+        
+        Queries the server for configuration of any DHCP modules present in self.modules (only "dhcp4" and "dhcp6" are considered), then updates self.subnets with IPv4 subnets keyed by their `id` and self.subnets6 with IPv6 subnets keyed by their `id`. If no DHCP modules are configured, the method returns without modifying state.
+        """
         dhcp_modules = [m for m in self.modules if m in ["dhcp4", "dhcp6"]]
         if not dhcp_modules:
             return
@@ -100,6 +125,18 @@ class KeaHTTPClient:
 
     def stats(self):
         # Reload subnets on update in case of configurational update
+        """
+        Fetch statistics from the Kea server and yield a record for each discovered module.
+        
+        Each yielded record corresponds to a module in the client's discovered module list and contains the server identifier, the module's DHCP version, the module-specific statistics/arguments, and the relevant subnet mapping. For the DDNS module the subnet mapping is an empty dict.
+        
+        Returns:
+            iterator: Yields tuples of the form (server_id, dhcp_version, arguments, subnets) where
+                - server_id (str): identifier for the Kea server (clean target URL),
+                - dhcp_version (DHCPVersion): enum value indicating DHCP4, DHCP6, or DDNS,
+                - arguments (dict): statistics/arguments returned by the module,
+                - subnets (dict): mapping of subnet id to subnet definition (empty for DDNS).
+        """
         self.load_subnets()
         # Note for future testing: pipe curl output to jq for an easier read
         r = requests.post(

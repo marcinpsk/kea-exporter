@@ -17,6 +17,13 @@ class Exporter:
 
     def __init__(self, targets, **kwargs):
         # prometheus
+        """
+        Initialize the Exporter: configure metric prefixes and metric containers, prepare DDNS/DHCP4/DHCP6 gauges and mappings, initialize tracking state for unhandled metrics and missing subnet info, and create client objects for each target.
+        
+        Parameters:
+            targets (Iterable[str]): Iterable of target addresses. Each target is parsed as a URL; if it has a URL scheme a KeaHTTPClient is created, otherwise if it has a path a KeaSocketClient is created. Targets that cannot be parsed or that raise OSError during client creation are skipped and not added to self.targets.
+            **kwargs: Additional keyword arguments forwarded to KeaHTTPClient or KeaSocketClient when creating clients.
+        """
         self.prefix = "kea"
         self.prefix_dhcp4 = f"{self.prefix}_dhcp4"
         self.prefix_dhcp6 = f"{self.prefix}_dhcp6"
@@ -71,6 +78,15 @@ class Exporter:
                 self.parse_metrics(*response)
 
     def setup_dhcp4_metrics(self):
+        """
+        Initialize Prometheus Gauge objects, mapping rules, and ignore lists for DHCPv4 metrics used by the exporter.
+        
+        Sets up the following attributes on self:
+        - metrics_dhcp4: dictionary of Gauge objects for DHCPv4 (packet counters and per-subnet/pool metrics) with appropriate label sets (including the new "server" label).
+        - metrics_dhcp4_map: mapping from KEA metric keys to internal metric names and any static labels required to populate Gauge labels.
+        - metrics_dhcp4_global_ignore: list of KEA metric keys to ignore at the top (global) level.
+        - metric_dhcp4_subnet_ignore: list of KEA metric keys to ignore when processing subnet-level metrics.
+        """
         self.metrics_dhcp4 = {
             # Packets
             "sent_packets": Gauge(f"{self.prefix_dhcp4}_packets_sent_total", "Packets sent", ["server", "operation"]),
@@ -250,6 +266,15 @@ class Exporter:
         ]
 
     def setup_dhcp6_metrics(self):
+        """
+        Initialize DHCPv6 Prometheus metric gauges, the mapping from KEA metric keys to those gauges, and ignore lists.
+        
+        This creates and assigns:
+        - `self.metrics_dhcp6`: named Gauge objects for packet counts, DHCPv4-over-DHCPv6 counts, per-subnet/pool allocation and lease metrics, IA_NA and IA_PD metrics, each using server/subnet/subnet_id/pool/context labels as appropriate.
+        - `self.metrics_dhcp6_map`: a mapping from KEA metric keys to entries with a target metric name and optional static labels used when exporting values.
+        - `self.metrics_dhcp6_global_ignore`: a list of metric keys to ignore at the global (top) level.
+        - `self.metric_dhcp6_subnet_ignore`: a list of metric keys to ignore at the subnet level.
+        """
         self.metrics_dhcp6 = {
             # Packets sent/received
             "sent_packets": Gauge(f"{self.prefix_dhcp6}_packets_sent_total", "Packets sent", ["server", "operation"]),
@@ -480,6 +505,15 @@ class Exporter:
         ]
 
     def setup_ddns_metrics(self):
+        """
+        Initialize DDNS-related Prometheus metrics, the mapping from external DDNS metric names to those metrics, and the per-key parsing pattern.
+        
+        Creates the following attributes on the instance:
+        - prefix_ddns: metric name prefix for DDNS metrics.
+        - metrics_ddns: dictionary of Prometheus Gauge objects for global DDNS counters (labeled by `server`) and per-key counters (labeled by `server` and `key`).
+        - metrics_ddns_map: mapping from external DDNS metric identifiers to entries in `metrics_ddns`.
+        - ddns_key_pattern: compiled regex that extracts the key and metric name from strings of the form `key[<key>].<metric>`.
+        """
         self.prefix_ddns = f"{self.prefix}_ddns"
         self.metrics_ddns = {
             # Global DDNS metrics
@@ -518,6 +552,17 @@ class Exporter:
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
         # Determine configuration based on DHCP version
+        """
+        Parse and export KEA metrics into Prometheus Gauges with appropriate labels.
+        
+        Processes a mapping of raw KEA metric keys to values for a given server and DHCP version, resolving subnet/pool context when keys match the subnet pattern, handling DDNS per-key metrics as a special case, and setting the corresponding Prometheus gauge labels and values. Unknown metrics and missing subnet/pool context are reported once via stderr output and tracked to avoid duplicate messages.
+        
+        Parameters:
+            server (str): Identifier of the source server; added to exported metric labels as `"server"`.
+            dhcp_version (DHCPVersion): Enumeration value indicating which metric mappings and ignores to use (DHCP4, DHCP6, or DDNS).
+            arguments (dict): Mapping of metric key -> metric data as returned by the KEA stats API; each value is expected to be an indexable sequence where `data[0][0]` yields the numeric metric value.
+            subnets (dict): Mapping of subnet_id (int) -> subnet metadata dict (contains keys like `"subnet"` and `"pools"`) used to resolve subnet and pool labels when the metric key encodes subnet/pool context.
+        """
         if dhcp_version is DHCPVersion.DHCP4:
             metrics_map = self.metrics_dhcp4_map
             metrics = self.metrics_dhcp4

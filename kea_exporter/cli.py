@@ -69,6 +69,17 @@ class Timer:
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
 @click.version_option(prog_name=__project__, version=__version__)
 def cli(port, address, interval, **kwargs):
+    """
+    Start the Kea exporter, expose Prometheus metrics over HTTP, and run the main loop.
+    
+    Instantiates the Exporter from provided keyword arguments, verifies targets are configured, starts a Prometheus HTTP server bound to the given address and port, installs a WSGI app that triggers exporter updates at most once per `interval` seconds, prints the listening address, and blocks indefinitely to keep the server running.
+    
+    Parameters:
+        port (int): TCP port to bind the Prometheus HTTP server.
+        address (str): IP address or hostname to bind the Prometheus HTTP server.
+        interval (int): Minimum number of seconds between consecutive exporter updates.
+        **kwargs: Passed through to Exporter constructor (for example: targets, client_cert, client_key, timeout).
+    """
     exporter = Exporter(**kwargs)
 
     if not exporter.targets:
