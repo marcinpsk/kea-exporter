@@ -8,15 +8,16 @@ from kea_exporter import DHCPVersion
 class KeaHTTPClient:
     def __init__(self, target, client_cert, client_key, timeout=10, **kwargs):
         """
-        Initialize the KeaHTTPClient and configure connection details.
-        
-        Parses the provided target URL and, if username and password are embedded, extracts them for use as HTTP basic auth while storing a cleaned target URL (without credentials) as the client target and server identifier. Stores optional client certificate and key, sets the request timeout, and initializes internal module and subnet caches. Finally, discovers available modules and loads subnet data.
+        Create a KeaHTTPClient configured to communicate with a Kea server and initialize its module and subnet caches.
         
         Parameters:
-            target (str): URL of the Kea server; may include embedded credentials (e.g., "https://user:pass@host:port").
-            client_cert (str | None): Path to the client certificate file, or None to skip mutual TLS.
-            client_key (str | None): Path to the client key file, or None to skip mutual TLS.
+            target (str): Kea server URL; may include embedded credentials (e.g. "https://user:pass@host:port"). Embedded credentials will be used for HTTP basic auth and removed from the effective request URL.
+            client_cert (str | None): Path to the client TLS certificate file, or None to disable mutual TLS.
+            client_key (str | None): Path to the client TLS key file, or None to disable mutual TLS.
             timeout (int | float): HTTP request timeout in seconds (default 10).
+        
+        Notes:
+            Initializes internal state (modules, subnet maps) and triggers discovery of available modules and subnets.
         """
         super().__init__()
 
@@ -65,11 +66,10 @@ class KeaHTTPClient:
         """
         Discover available Kea services and populate self.modules.
         
-        Sends a configuration query to the Kea server, reads the returned configuration
-        arguments, and populates the instance's `modules` list. Prefers legacy Control
-        Agent discovery via the `Control-agent.control-sockets` entry; if absent,
-        performs a case-insensitive inspection of top-level service keys and adds any
-        of `dhcp4`, `dhcp6`, or `ddns` (treating `d2` as `ddns`).
+        Queries the server configuration and fills self.modules with the detected service names.
+        Prefers discovery via the Control-agent's `control-sockets` entry when present; otherwise
+        inspects top-level service keys case-insensitively and adds any of "dhcp4", "dhcp6",
+        or "ddns" as found. Treats the legacy key "d2" as "ddns".
         """
         r = requests.post(
             self._target,
@@ -100,9 +100,9 @@ class KeaHTTPClient:
     def load_subnets(self):
         # Only load subnets for DHCP services (DDNS doesn't have subnets)
         """
-        Load IPv4 and IPv6 subnet definitions from the server configuration and store them on the instance.
+        Load IPv4 and IPv6 subnet definitions for configured DHCP modules into the instance maps.
         
-        Queries the server for configuration of any DHCP modules present in self.modules (only "dhcp4" and "dhcp6" are considered), then updates self.subnets with IPv4 subnets keyed by their `id` and self.subnets6 with IPv6 subnets keyed by their `id`. If no DHCP modules are configured, the method returns without modifying state.
+        Fetches configuration for any DHCP modules present in self.modules (only "dhcp4" and "dhcp6" are considered) and updates self.subnets with IPv4 subnet entries keyed by their `id` and self.subnets6 with IPv6 subnet entries keyed by their `id`. If no DHCP modules are configured, the method returns without modifying state.
         """
         dhcp_modules = [m for m in self.modules if m in ["dhcp4", "dhcp6"]]
         if not dhcp_modules:
