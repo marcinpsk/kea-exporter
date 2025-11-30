@@ -73,6 +73,11 @@ class Exporter:
             self.targets.append(client)
 
     def update(self):
+        """
+        Fetch metrics from all configured targets and update the exporter's Prometheus metrics.
+        
+        Iterates each configured client, retrieves that client's reported metric responses, and processes each response so the exporter's metric gauges reflect the latest values.
+        """
         for target in self.targets:
             for response in target.stats():
                 self.parse_metrics(*response)
@@ -267,13 +272,13 @@ class Exporter:
 
     def setup_dhcp6_metrics(self):
         """
-        Initialize DHCPv6 Prometheus metric gauges, the mapping from KEA metric keys to those gauges, and ignore lists.
+        Create and register Prometheus Gauges and the mappings and ignore lists used to export DHCPv6 metrics.
         
-        This creates and assigns:
-        - `self.metrics_dhcp6`: named Gauge objects for packet counts, DHCPv4-over-DHCPv6 counts, per-subnet/pool allocation and lease metrics, IA_NA and IA_PD metrics, each using server/subnet/subnet_id/pool/context labels as appropriate.
-        - `self.metrics_dhcp6_map`: a mapping from KEA metric keys to entries with a target metric name and optional static labels used when exporting values.
-        - `self.metrics_dhcp6_global_ignore`: a list of metric keys to ignore at the global (top) level.
-        - `self.metric_dhcp6_subnet_ignore`: a list of metric keys to ignore at the subnet level.
+        Initializes these instance attributes:
+        - metrics_dhcp6: named Gauge objects for DHCPv6 packet counts, DHCPv4-over-DHCPv6 counts, per-subnet/pool allocation and lease metrics, IA_NA and IA_PD metrics (with appropriate label sets).
+        - metrics_dhcp6_map: mapping from KEA metric keys to entries that specify which Gauge to use and any static labels to apply.
+        - metrics_dhcp6_global_ignore: list of KEA metric keys to ignore at the global (top) level.
+        - metric_dhcp6_subnet_ignore: list of KEA metric keys to ignore at the subnet level.
         """
         self.metrics_dhcp6 = {
             # Packets sent/received

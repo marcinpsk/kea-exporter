@@ -56,11 +56,11 @@ class KeaSocketClient:
         # I don't currently know how to detect a changed configuration, so
         # unfortunately we're reloading more often now as a workaround.
         """
-        Reloads the Kea configuration and yields current server statistics together with the subnet map.
+        Yield current server statistics and subnet mapping after reloading the configuration.
         
         Yields:
             tuple: (server_id, dhcp_version, arguments, subnets)
-                - server_id (str): Absolute path identifying the Unix domain socket server.
+                - server_id (str): Absolute Unix domain socket path identifying the server.
                 - dhcp_version (DHCPVersion): Detected DHCP version for the server.
                 - arguments (dict): Statistic values returned by the server's "statistic-get-all" command.
                 - subnets (dict): Mapping from subnet ID to subnet configuration objects.
@@ -73,9 +73,9 @@ class KeaSocketClient:
 
     def reload(self):
         """
-        Refresh stored configuration from the Kea socket, update DHCP version, and build the subnet map.
+        Refresh the client's configuration from the Kea server and update the DHCP version and subnet mapping.
         
-        Queries the server for the current configuration and stores the response's "arguments" in self.config. If a "Dhcp4" section is present, sets self.dhcp_version to DHCPVersion.DHCP4 and uses its "subnet4" list; if a "Dhcp6" section is present, sets self.dhcp_version to DHCPVersion.DHCP6 and uses its "subnet6" list. Populates self.subnets as a dictionary mapping each subnet's "id" to the subnet object. If neither Dhcp4 nor Dhcp6 is present, writes an error to stderr and exits the process with status 1.
+        Retrieves the server configuration and stores its "arguments" in self.config. Sets self.dhcp_version to DHCPVersion.DHCP4 when a "Dhcp4" section is present (using its "subnet4" list) or to DHCPVersion.DHCP6 when a "Dhcp6" section is present (using its "subnet6" list). Populates self.subnets as a dictionary mapping each subnet's "id" to the subnet object. If neither "Dhcp4" nor "Dhcp6" is found, writes an error message to stderr and exits the process with status 1.
         """
         self.config = self.query("config-get")["arguments"]
 
