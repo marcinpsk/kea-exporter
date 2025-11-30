@@ -517,17 +517,28 @@ class Exporter:
         self.ddns_key_pattern = re.compile(r"^key\[(?P<key>[^\]]+)\]\.(?P<metric>.+)$")
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
+        # Determine configuration based on DHCP version
+        if dhcp_version is DHCPVersion.DHCP4:
+            metrics_map = self.metrics_dhcp4_map
+            metrics = self.metrics_dhcp4
+            global_ignore = self.metrics_dhcp4_global_ignore
+            subnet_ignore = self.metric_dhcp4_subnet_ignore
+        elif dhcp_version is DHCPVersion.DHCP6:
+            metrics_map = self.metrics_dhcp6_map
+            metrics = self.metrics_dhcp6
+            global_ignore = self.metrics_dhcp6_global_ignore
+            subnet_ignore = self.metric_dhcp6_subnet_ignore
+        elif dhcp_version is DHCPVersion.DDNS:
+            metrics_map = self.metrics_ddns_map
+            metrics = self.metrics_ddns
+            global_ignore = []
+            subnet_ignore = []
+        else:
+            return
+
         for key, data in arguments.items():
-            if dhcp_version is DHCPVersion.DHCP4:
-                if key in self.metrics_dhcp4_global_ignore:
-                    continue
-            elif dhcp_version is DHCPVersion.DHCP6:
-                if key in self.metrics_dhcp6_global_ignore:
-                    continue
-            elif dhcp_version is DHCPVersion.DDNS:
-                # DDNS metrics are processed separately below
-                pass
-            else:
+            # Check global ignore list
+            if key in global_ignore:
                 continue
 
             value, _ = data[0]
@@ -540,19 +551,8 @@ class Exporter:
                 pool_metric = subnet_match.group("pool_metric")
                 subnet_metric = subnet_match.group("subnet_metric")
 
-                if dhcp_version is DHCPVersion.DHCP4:
-                    if (
-                        pool_metric in self.metric_dhcp4_subnet_ignore
-                        or subnet_metric in self.metric_dhcp4_subnet_ignore
-                    ):
-                        continue
-                elif dhcp_version is DHCPVersion.DHCP6:
-                    if (
-                        pool_metric in self.metric_dhcp6_subnet_ignore
-                        or subnet_metric in self.metric_dhcp6_subnet_ignore
-                    ):
-                        continue
-                else:
+                # Check subnet ignore list
+                if pool_metric in subnet_ignore or subnet_metric in subnet_ignore:
                     continue
 
                 subnet_data = subnets.get(subnet_id, [])
@@ -591,15 +591,8 @@ class Exporter:
                     key = subnet_metric
                     labels["pool"] = ""
 
-            if dhcp_version is DHCPVersion.DHCP4:
-                metrics_map = self.metrics_dhcp4_map
-                metrics = self.metrics_dhcp4
-            elif dhcp_version is DHCPVersion.DHCP6:
-                metrics_map = self.metrics_dhcp6_map
-                metrics = self.metrics_dhcp6
-            elif dhcp_version is DHCPVersion.DDNS:
-                # Handle DDNS metrics
-                # Check for per-key metrics first
+            # Handle DDNS per-key metrics (special case)
+            if dhcp_version is DHCPVersion.DDNS:
                 key_match = self.ddns_key_pattern.match(key)
                 if key_match:
                     key_name = key_match.group("key")
@@ -632,12 +625,7 @@ class Exporter:
                     metric.labels(**labels).set(value)
                     continue
 
-                # Handle global DDNS metrics
-                metrics_map = self.metrics_ddns_map
-                metrics = self.metrics_ddns
-            else:
-                continue
-
+            # Handle standard metrics
             try:
                 metric_info = metrics_map[key]
             except KeyError:
