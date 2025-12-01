@@ -21,6 +21,15 @@ Prometheus Exporter for the ISC Kea DHCP Server.
 From v0.4.0 on Kea >=1.3.0 is required, as the configuration, specifically
 subnet information, will be read from the control socket.
 
+
+Fork
+============
+This project is a fork of the original repository:
+
+Upstream: https://github.com/mweinelt/kea-exporter
+
+This fork exists to provide fixes/updates that are not present on upstream. If they show up on upstream, I'll revisit whether to keep this one.
+
 Installation
 ------------
 
