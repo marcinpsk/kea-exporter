@@ -94,7 +94,7 @@ def cli(port, address, interval, **kwargs: Any):
     if not exporter.targets:
         sys.exit(1)
 
-    httpd = start_http_server(port, address)
+    httpd, _ = start_http_server(port, address)
 
     t = Timer()
 

@@ -114,7 +114,7 @@ class TestCLIOptions(unittest.TestCase):
         # Exit after first iteration
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -127,8 +127,8 @@ class TestCLIOptions(unittest.TestCase):
         mock_http_server.assert_called_once()
         call_args = mock_http_server.call_args[0]
         self.assertEqual(call_args[0], 9547)  # port
-        mock_http_server.return_value.shutdown.assert_called_once()
-        mock_http_server.return_value.server_close.assert_called_once()
+        mock_http_server.return_value[0].shutdown.assert_called_once()
+        mock_http_server.return_value[0].server_close.assert_called_once()
 
     @patch("kea_exporter.cli.Exporter")
     @patch("kea_exporter.cli.start_http_server")
@@ -137,7 +137,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI with custom port"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -157,7 +157,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI with default address"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -178,7 +178,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI with custom address"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -198,7 +198,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI with custom timeout parameter"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -219,7 +219,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI with default timeout"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -253,7 +253,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI with multiple targets"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock(), Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -275,7 +275,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI interval parameter"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -293,7 +293,7 @@ class TestCLIOptions(unittest.TestCase):
         """Test CLI with client certificate options"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -349,7 +349,7 @@ class TestCLIWSGIApp(unittest.TestCase):
         mock_exporter.return_value = mock_exporter_instance
 
         mock_httpd = Mock()
-        mock_http_server.return_value = mock_httpd
+        mock_http_server.return_value = (mock_httpd, Mock())
 
         # Mock the WSGI app
         mock_wsgi_func = Mock(return_value=[b"metrics"])
@@ -378,7 +378,7 @@ class TestCLIWSGIApp(unittest.TestCase):
         wsgi_app(environ, start_response)
 
         # With interval=0, update should be called every time
-        self.assertGreaterEqual(mock_exporter_instance.update.call_count, 1)
+        self.assertGreaterEqual(mock_exporter_instance.update.call_count, 2)
 
 
 class TestCLIEnvironmentVariables(unittest.TestCase):
@@ -402,7 +402,7 @@ class TestCLIEnvironmentVariables(unittest.TestCase):
         """Test PORT environment variable"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -422,7 +422,7 @@ class TestCLIEnvironmentVariables(unittest.TestCase):
         """Test ADDRESS environment variable"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -442,7 +442,7 @@ class TestCLIEnvironmentVariables(unittest.TestCase):
         """Test TIMEOUT environment variable"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -462,7 +462,7 @@ class TestCLIEnvironmentVariables(unittest.TestCase):
         """Test TARGETS environment variable"""
         mock_sleep.side_effect = KeyboardInterrupt
         mock_exporter.return_value.targets = [Mock()]
-        mock_http_server.return_value = Mock()
+        mock_http_server.return_value = (Mock(), Mock())
 
         from click.testing import CliRunner
 
@@ -475,7 +475,7 @@ class TestCLIEnvironmentVariables(unittest.TestCase):
         call_kwargs = mock_exporter.call_args[1]
         # Click parses space-separated targets from env
         targets = call_kwargs["targets"]
-        self.assertGreater(len(targets), 0)
+        self.assertEqual(len(targets), 2)
 
 
 if __name__ == "__main__":

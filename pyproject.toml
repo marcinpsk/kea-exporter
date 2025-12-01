@@ -112,8 +112,8 @@ docstring-code-line-length = "dynamic"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.14.7",
-    "black>=25.11.0",
+    "ruff==0.14.7",
+    "black==25.11.0",
     "coverage[toml]>=7.12.0",
 ]
 

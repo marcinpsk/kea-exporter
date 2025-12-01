@@ -17,7 +17,7 @@ class Exporter:
         r"|(?P<subnet_metric>[\w-]+))$"
     )
 
-    def __init__(self, targets, registry=None, **kwargs):
+    def __init__(self, targets, registry=None, **kwargs) -> None:
         # prometheus
         """
         Initialize the Exporter: configure metric prefixes and metric
@@ -116,7 +116,7 @@ class Exporter:
           labels.
         - metrics_dhcp4_global_ignore: list of KEA metric keys to ignore
           at the top (global) level.
-        - metric_dhcp4_subnet_ignore: list of KEA metric keys to ignore
+        - metrics_dhcp4_subnet_ignore: list of KEA metric keys to ignore
           when processing subnet-level metrics.
         """
         self.metrics_dhcp4 = {
@@ -324,7 +324,7 @@ class Exporter:
           specify which Gauge to use and any static labels to apply.
         - metrics_dhcp6_global_ignore: list of KEA metric keys to ignore
           at the global (top) level.
-        - metric_dhcp6_subnet_ignore: list of KEA metric keys to ignore at
+        - metrics_dhcp6_subnet_ignore: list of KEA metric keys to ignore at
           the subnet level.
         """
         self.metrics_dhcp6 = {
@@ -344,7 +344,7 @@ class Exporter:
             # DHCPv4-over-DHCPv6
             "sent_dhcp4_packets": Gauge(
                 f"{self.prefix_dhcp6}_packets_sent_dhcp4_total",
-                "DHCPv4-over-DHCPv6 Packets received",
+                "DHCPv4-over-DHCPv6 Packets sent",
                 ["server", "operation"],
                 registry=self.registry,
             ),
