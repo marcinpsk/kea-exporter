@@ -1,17 +1,66 @@
-name: "Lint"
+name: "Lint & Test"
 
-on:
+"on":
   push:
   pull_request:
 
 jobs:
-  checks:
-    if: github.repository == 'mweinelt/kea-exporter'
+  lint:
+    name: Lint code
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: cachix/install-nix-action@v19
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4.1
         with:
-          nix_path: nixpkgs=channel:nixpkgs-unstable
-      - run: |
-          nix flake check -L
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pdm install --dev --frozen-lockfile
+
+      - name: Run Ruff
+        run: pdm run ruff check .
+
+      - name: Run Black (check only)
+        run: pdm run black --check .
+
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4.1
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pdm install --frozen-lockfile
+
+      - name: Run tests
+        run: pdm run python -m unittest discover tests -v
+
+  coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4.1
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pdm install --frozen-lockfile
+
+      - name: Run tests with coverage
+        run: pdm run coverage run --source=kea_exporter -m unittest discover tests -v
+
+      - name: Report coverage
+        run: pdm run coverage report -m --fail-under=80
