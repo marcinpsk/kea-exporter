@@ -1,7 +1,6 @@
 {% if context.history.unreleased | length > 0 %}
-{{ context.version.as_tag() }}
 {% for type_, commits in context.history.unreleased | dictsort %}
-{% if type_ != "unknown" %}
+{% if commits and type_ not in ["unknown", "chore", "ci", "style", "test", "refactor"] %}
 {% for commit in commits %}
  - {{ commit.descriptions[0] }}
 {% endfor %}
@@ -9,4 +8,9 @@
 {% endfor %}
 
 {% endif %}
-{{ context.history.released | join("\n") }}
+{% for release in context.history.released %}
+{{ release.elements | join("\n") }}
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}

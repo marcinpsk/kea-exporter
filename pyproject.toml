@@ -106,12 +106,6 @@ line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = "dynamic"
 
-[tool.pdm.group.semantic-release]
-optional = false
-
-[tool.pdm.group.semantic-release.dependencies]
-python-semantic-release = "*"
-
 [tool.pdm.version]
 source = "file"
 path = "kea_exporter/__init__.py"
