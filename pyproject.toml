@@ -106,10 +106,6 @@ line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = "dynamic"
 
-[tool.pdm.version]
-source = "file"
-path = "kea_exporter/__init__.py"
-
 [dependency-groups]
 dev = [
     "ruff==0.14.7",
