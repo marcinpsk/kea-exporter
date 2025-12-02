@@ -36,7 +36,7 @@ jobs:
         id: semantic_release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pdm run semantic-release version --commit --tag --changelog --push
+        run: pdm run semantic-release version --changelog --push
 
       - name: Create Pull Request to main
         if: steps.semantic_release.outcome == 'success'
@@ -44,9 +44,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Check if there's already an open PR from staging to main
-          existing_pr=$(gh pr list --base main --head staging --state open --json number --jq '.[0].number')
+          existing_pr=$(gh pr list --base main --head staging --state open --json number --jq -r '.[0].number // empty')
 
           if [ -z "$existing_pr" ]; then
+            # Fetch latest tags from remote
+            git fetch --tags origin
+
             # Get the latest release tag for PR title/body
             latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "staging")
 
