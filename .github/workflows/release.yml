@@ -2,7 +2,8 @@ name: Release
 
 "on":
   push:
-    branches: ["main"]
+    branches: 
+      - staging
 
 permissions:
   contents: write
