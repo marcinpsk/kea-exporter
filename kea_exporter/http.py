@@ -148,6 +148,9 @@ class KeaHTTPClient:
         )
         config = r.json()
         for module in config:
+            # Skip non-dict responses (e.g., error strings)
+            if not isinstance(module, dict):
+                continue
             for subnet in module.get("arguments", {}).get("Dhcp4", {}).get("subnet4", []):
                 self.subnets.update({subnet["id"]: subnet})
             for subnet in module.get("arguments", {}).get("Dhcp6", {}).get("subnet6", []):
