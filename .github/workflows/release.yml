@@ -28,9 +28,6 @@ jobs:
         with:
           node-version: 'lts/*'
 
-      - name: Install dependencies
-        run: npm clean-install
-
       - name: Install semantic-release
         run: npm install --no-save semantic-release@^25 @semantic-release/changelog@^6 @semantic-release/git@^10 @semantic-release/github@^12
 
