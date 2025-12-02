@@ -1,0 +1,23 @@
+{% if context.history.unreleased | length > 0 %}
+{% for type_, commits in context.history.unreleased | dictsort %}
+{% if commits and type_ not in ["unknown", "chore", "ci", "style", "test", "refactor"] %}
+{% for commit in commits %}
+ - {{ commit.descriptions[0] if commit.descriptions else commit.subject }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+{% endif %}
+{% for version, release in context.history.released.items() %}
+{{ version }}
+{% for type_, commits in release.elements | dictsort %}
+{% if commits and type_ not in ["unknown", "chore", "ci", "style", "test", "refactor"] %}
+{% for commit in commits %}
+ - {{ commit.descriptions[0] if commit.descriptions else commit.subject }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% if not loop.last %}
+
+{% endif %}
+{% endfor %}

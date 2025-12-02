@@ -6,7 +6,7 @@ build-backend = "pdm.backend"
 # PEP 621 project metadata
 # See https://www.python.org/dev/peps/pep-0621/
 name = "kea-exporter"
-dynamic = [ "version" ]
+version = "0.7.2"
 description = "Export Kea Metrics in the Prometheus Exposition Format"
 authors = [
     { name = "Martin Weinelt", email = "hexa@darmstadt.ccc.de" },
@@ -45,10 +45,6 @@ upstream = "https://github.com/mweinelt/kea-exporter"
 
 [project.scripts]
 kea-exporter = "kea_exporter.__main__:cli"
-
-[tool.pdm.version]
-source = "file"
-path = "kea_exporter/__init__.py"
 
 [tool.black]
 line-length = 120
@@ -115,6 +111,7 @@ dev = [
     "ruff==0.14.7",
     "black==25.11.0",
     "coverage[toml]>=7.12.0",
+    "python-semantic-release>=10.5.2",
 ]
 
 [tool.coverage.run]
@@ -124,3 +121,67 @@ source = ["kea_exporter"]
 [tool.coverage.report]
 omit = ["tests/*"]
 show_missing = true
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["kea_exporter/__init__.py:__version__"]
+branch = "main"
+build_command = "pdm build"
+commit_message = "chore(release): {version} [skip ci]"
+major_on_zero = true
+allow_zero_version = true
+tag_format = "v{version}"
+commit_parser = "conventional"
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "style", "refactor", "test"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+
+[tool.semantic_release.branches.main]
+match = "(main|master)"
+prerelease_token = "rc"
+prerelease = false
+
+[tool.semantic_release.changelog]
+# Recommended patterns for conventional commits parser that is scope aware
+exclude_commit_patterns = [
+    '''chore(?:\([^)]*?\))?: .+''',
+    '''ci(?:\([^)]*?\))?: .+''',
+    '''refactor(?:\([^)]*?\))?: .+''',
+    '''style(?:\([^)]*?\))?: .+''',
+    '''test(?:\([^)]*?\))?: .+''',
+    '''build\((?!deps\): .+)''',
+    '''Initial [Cc]ommit.*''',
+]
+changelog_file = "HISTORY"
+mode = "init"
+
+[tool.semantic_release.changelog.environment]
+block_start_string = "{%"
+block_end_string = "%}"
+variable_start_string = "{{"
+variable_end_string = "}}"
+comment_start_string = "{#"
+comment_end_string = "#}"
+trim_blocks = false
+lstrip_blocks = false
+newline_sequence = "\n"
+keep_trailing_newline = false
+extensions = []
+autoescape = false
+
+[tool.semantic_release.commit_author]
+env = "GIT_COMMIT_AUTHOR"
+default = "semantic-release <semantic-release>"
+
+
+[tool.semantic_release.remote]
+name = "origin"
+type = "github"
+ignore_token_for_push = false
+insecure = false
+
+[tool.semantic_release.publish]
+dist_glob_patterns = ["dist/*"]
+upload_to_vcs_release = true
