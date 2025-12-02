@@ -84,7 +84,7 @@ This will:
 - Use different credentials for each endpoint (if needed)
 - Expose metrics on port 9547
 - Add `server` labels to distinguish between endpoints
-- Credentials are stripped from labels (not exposed in metrics)
+- Credentials are stripped from labels and not exposed in metrics
 
 ## Client Certificate Authentication
 
