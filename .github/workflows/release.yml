@@ -2,7 +2,7 @@ name: Release
 
 "on":
   push:
-    branches: 
+    branches:
       - staging
 
 permissions:
@@ -33,6 +33,36 @@ jobs:
         run: pdm install --dev
 
       - name: Run semantic-release
+        id: semantic_release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pdm run semantic-release version --commit --tag --changelog --push
+
+      - name: Create Pull Request to main
+        if: steps.semantic_release.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if there's already an open PR from staging to main
+          existing_pr=$(gh pr list --base main --head staging --state open --json number --jq '.[0].number')
+
+          if [ -z "$existing_pr" ]; then
+            # Get the latest release tag for PR title/body
+            latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "staging")
+
+            # Create PR from staging to main
+            gh pr create \
+              --base main \
+              --head staging \
+              --title "Release: $latest_tag" \
+              --body "Automated release PR created after successful semantic-release on staging branch.
+
+          This PR includes version bumps, changelog updates, and release commits from the staging branch.
+
+          **Release Tag:** $latest_tag
+
+          Please review and merge to complete the release process." \
+              --label "release" || echo "PR creation failed, may already exist"
+          else
+            echo "PR #$existing_pr already exists from staging to main, skipping creation"
+          fi
