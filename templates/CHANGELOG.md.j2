@@ -1,0 +1,12 @@
+{% if context.history.unreleased | length > 0 %}
+{{ context.version.as_tag() }}
+{% for type_, commits in context.history.unreleased | dictsort %}
+{% if type_ != "unknown" %}
+{% for commit in commits %}
+ - {{ commit.descriptions[0] }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+{% endif %}
+{{ context.history.released | join("\n") }}
