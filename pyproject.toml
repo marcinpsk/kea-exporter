@@ -125,13 +125,15 @@ show_missing = true
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
 version_variables = ["kea_exporter/__init__.py:__version__"]
-branch = "main"
+branch = "staging"
 build_command = "pdm build"
 commit_message = "chore(release): {version} [skip ci]"
 major_on_zero = true
 allow_zero_version = true
 tag_format = "v{version}"
 commit_parser = "conventional"
+commit = true
+tag = true
 
 [tool.semantic_release.commit_parser_options]
 allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "style", "refactor", "test"]

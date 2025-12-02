@@ -4,3 +4,7 @@ early_access: true
 enable_free_tier: true
 reviews:
   profile: assertive
+  auto_review:
+    base_branches:
+      - main
+      - staging
