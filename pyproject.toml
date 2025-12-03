@@ -137,6 +137,7 @@ tag = true
 
 [tool.semantic_release.branches.staging]
 match = "staging"
+prerelease_token = "rc"
 prerelease = false
 
 [tool.semantic_release.commit_parser_options]
