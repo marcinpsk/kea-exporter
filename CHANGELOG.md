@@ -1,5 +1,19 @@
 
 
+0.7.6
+
+
+
+ - docker build fix to include event PR
+
+
+
+
+
+
+
+
+
 0.7.5
 
 
