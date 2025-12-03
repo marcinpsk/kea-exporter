@@ -1,0 +1,36 @@
+name: Cleanup old PR packages
+
+on:
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update
+          sudo apt install gh -y
+
+      - name: List PR packages and delete old ones
+        run: |
+          set -e
+          set -o pipefail
+          # List all Docker packages
+          gh api --paginate --slurp \
+            -H "Accept: application/vnd.github.v3+json" \
+            /user/packages?package_type=container \
+            | jq -r '.[] | select(.name | test("pr-")) | "\(.name)"' \
+            | while read name; do
+                # Get all versions for this package
+                gh api --paginate --slurp \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  /user/packages/container/$name/versions \
+                  | jq -r '.[] | select((now - (.created_at | fromdateiso8601)) > 31536000) | .id' \
+                  | while read version_id; do
+                    echo "Deleting version $version_id for package $name"
+                    gh api -X DELETE /user/packages/container/$name/versions/$version_id
+                  done
+              done

@@ -165,6 +165,7 @@ mode = "init"
 
 [tool.semantic_release.changelog.default_templates]
 changelog_file = "HISTORY"
+template = "templates/CHANGELOG.md.j2"
 
 [tool.semantic_release.changelog.environment]
 block_start_string = "{%"
