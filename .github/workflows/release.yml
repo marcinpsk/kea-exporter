@@ -59,7 +59,6 @@ jobs:
           This PR includes version bumps, changelog updates, and release commits from the staging branch.
 
           **Release Tag:** $latest_tag
-
           Please review and merge to complete the release process." \
               --label "release" || echo "PR creation failed, may already exist"
           else
