@@ -5,6 +5,9 @@ on:
 
 jobs:
   cleanup:
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
