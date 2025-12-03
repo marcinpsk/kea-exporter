@@ -6,16 +6,13 @@ on:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Install GitHub CLI
         run: |
           sudo apt update
           sudo apt install gh -y
-
-      - name: Set up GitHub CLI authentication
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: true
 
       - name: List PR packages and delete old ones
         run: |
