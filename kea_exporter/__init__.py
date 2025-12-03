@@ -1,7 +1,7 @@
 from enum import Enum
 
 __project__ = "kea-exporter"
-__version__ = "0.7.4"
+__version__ = "0.7.5"
 
 
 class DHCPVersion(Enum):
