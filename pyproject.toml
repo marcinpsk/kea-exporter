@@ -135,6 +135,11 @@ commit_parser = "conventional"
 commit = true
 tag = true
 
+[tool.semantic_release.branches.staging]
+match = "staging"
+prerelease_token = "rc"
+prerelease = false
+
 [tool.semantic_release.commit_parser_options]
 allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "style", "refactor", "test"]
 minor_tags = ["feat"]
@@ -156,8 +161,10 @@ exclude_commit_patterns = [
     '''build\((?!deps\): .+)''',
     '''Initial [Cc]ommit.*''',
 ]
-changelog_file = "HISTORY"
 mode = "init"
+
+[tool.semantic_release.changelog.default_templates]
+changelog_file = "HISTORY"
 
 [tool.semantic_release.changelog.environment]
 block_start_string = "{%"
