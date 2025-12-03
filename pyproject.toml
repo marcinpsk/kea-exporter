@@ -161,8 +161,10 @@ exclude_commit_patterns = [
     '''build\((?!deps\): .+)''',
     '''Initial [Cc]ommit.*''',
 ]
-changelog_file = "HISTORY"
 mode = "init"
+
+[tool.semantic_release.changelog.default_templates]
+changelog_file = "HISTORY"
 
 [tool.semantic_release.changelog.environment]
 block_start_string = "{%"
