@@ -1,5 +1,27 @@
 
 
+0.7.4
+
+
+
+ - auth for cleanup workflow fix
+
+ - auth for cleanup workflow fix
+
+ - update semantic-release pyproject.toml
+
+ - update cleanup workflow
+
+ - tighten tag generation for docker images
+
+ - add cleanup of old PR container packages
+
+
+
+
+
+
+
 0.7.3
 
 
