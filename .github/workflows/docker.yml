@@ -38,6 +38,7 @@ jobs:
           tags: |
             type=ref,event=branch,suffix=-${{ matrix.distro }}
             type=ref,event=tag,suffix=-${{ matrix.distro }}
+            type=ref,event=pr,suffix=-${{ matrix.distro }}
             type=raw,value=latest-${{ matrix.distro }}
             type=raw,value=latest,enable=${{ matrix.distro == 'debian' }}
             type=semver,pattern={{major}}.{{minor}}-${{ matrix.distro }}
