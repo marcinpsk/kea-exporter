@@ -44,7 +44,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Check if there's already an open PR from staging to main
-          existing_pr=$(gh pr list --base main --head staging --state open --json number --jq -r '.[0].number // empty')
+          existing_pr=$(gh pr list --base main --head staging --state open --json number -q '.[0].number // empty')
 
           if [ -z "$existing_pr" ]; then
             # Fetch latest tags from remote
