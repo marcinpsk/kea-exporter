@@ -40,7 +40,7 @@ jobs:
             type=ref,event=tag,suffix=-${{ matrix.distro }}
             type=raw,value=latest-${{ matrix.distro }}
             type=raw,value=latest,enable=${{ matrix.distro == 'debian' }}
-            type=raw,value=${{ github.ref_name | split: '.' | slice: 0,2 | join: '.' }}-${{ matrix.distro }}
+            type=raw,value=${{ github.ref_name | split: '.' | slice: 0,2 | join: '.' }}-${{ matrix.distro }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
