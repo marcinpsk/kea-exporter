@@ -1,0 +1,33 @@
+name: Cleanup old PR packages
+
+on:
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update
+          sudo apt install gh -y
+
+      - name: Authenticate GitHub CLI
+        run: |
+          gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: List PR packages and delete old ones
+        run: |
+          # List all Docker packages
+          gh api \
+            -H "Accept: application/vnd.github.v3+json" \
+            /user/packages?package_type=container \
+            | jq -r '.[] | select(.name | test("pr-")) | "\(.name) \(.created_at)"' \
+            | while read name created_at; do
+                # Check if older than 1 year
+                if [[ $(date -d "$created_at" +%s) -lt $(date -d "1 year ago" +%s) ]]; then
+                  echo "Deleting $name created at $created_at"
+                  gh api -X DELETE /user/packages/container/$name/versions --silent
+                fi
+              done
+
