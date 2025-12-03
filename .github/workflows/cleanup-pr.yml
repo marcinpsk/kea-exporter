@@ -12,9 +12,10 @@ jobs:
           sudo apt update
           sudo apt install gh -y
 
-      - name: Authenticate GitHub CLI
-        run: |
-          gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
+      - name: Set up GitHub CLI authentication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: true
 
       - name: List PR packages and delete old ones
         run: |
@@ -22,12 +23,15 @@ jobs:
           gh api \
             -H "Accept: application/vnd.github.v3+json" \
             /user/packages?package_type=container \
-            | jq -r '.[] | select(.name | test("pr-")) | "\(.name) \(.created_at)"' \
-            | while read name created_at; do
-                # Check if older than 1 year
-                if [[ $(date -d "$created_at" +%s) -lt $(date -d "1 year ago" +%s) ]]; then
-                  echo "Deleting $name created at $created_at"
-                  gh api -X DELETE /user/packages/container/$name/versions --silent
-                fi
+            | jq -r '.[] | select(.name | test("pr-")) | "\(.name)"' \
+            | while read name; do
+                # Get all versions for this package
+                gh api \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  /user/packages/container/$name/versions \
+                  | jq -r '.[] | select((now - (.created_at | fromdateiso8601)) > 31536000) | .id' \
+                  | while read version_id; do
+                    echo "Deleting version $version_id for package $name"
+                    gh api -X DELETE /user/packages/container/$name/versions/$version_id
+                  done
               done
-
