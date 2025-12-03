@@ -1,12 +1,9 @@
-name: Create and publish a Docker image for release
+name: Create and publish a Docker image for staging
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
   pull_request:
     branches:
-      - main
+      - staging
 
 env:
   REGISTRY: ghcr.io
@@ -36,11 +33,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch,suffix=-${{ matrix.distro }}
-            type=ref,event=tag,suffix=-${{ matrix.distro }}
-            type=raw,value=latest-${{ matrix.distro }}
-            type=raw,value=latest,enable=${{ matrix.distro == 'debian' }}
-            type=semver,pattern={{major}}.{{minor}}-${{ matrix.distro }}
+            type=ref,event=pr,suffix=-${{ matrix.distro }}-rc
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:

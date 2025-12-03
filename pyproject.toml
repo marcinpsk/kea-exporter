@@ -6,7 +6,7 @@ build-backend = "pdm.backend"
 # PEP 621 project metadata
 # See https://www.python.org/dev/peps/pep-0621/
 name = "kea-exporter"
-version = "0.7.3"
+version = "0.7.5"
 description = "Export Kea Metrics in the Prometheus Exposition Format"
 authors = [
     { name = "Martin Weinelt", email = "hexa@darmstadt.ccc.de" },
@@ -165,6 +165,7 @@ mode = "init"
 
 [tool.semantic_release.changelog.default_templates]
 changelog_file = "HISTORY"
+template = "templates/CHANGELOG.md.j2"
 
 [tool.semantic_release.changelog.environment]
 block_start_string = "{%"
