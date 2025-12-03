@@ -5,10 +5,6 @@ name: Release
     branches:
       - staging
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   semantic-release:
     name: Semantic Release
