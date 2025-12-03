@@ -6,7 +6,7 @@ build-backend = "pdm.backend"
 # PEP 621 project metadata
 # See https://www.python.org/dev/peps/pep-0621/
 name = "kea-exporter"
-version = "0.7.2"
+version = "0.7.3"
 description = "Export Kea Metrics in the Prometheus Exposition Format"
 authors = [
     { name = "Martin Weinelt", email = "hexa@darmstadt.ccc.de" },
@@ -125,13 +125,20 @@ show_missing = true
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
 version_variables = ["kea_exporter/__init__.py:__version__"]
-branch = "main"
+branch = "staging"
 build_command = "pdm build"
 commit_message = "chore(release): {version} [skip ci]"
 major_on_zero = true
 allow_zero_version = true
 tag_format = "v{version}"
 commit_parser = "conventional"
+commit = true
+tag = true
+
+[tool.semantic_release.branches.staging]
+match = "staging"
+prerelease_token = "rc"
+prerelease = false
 
 [tool.semantic_release.commit_parser_options]
 allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "style", "refactor", "test"]
@@ -154,8 +161,10 @@ exclude_commit_patterns = [
     '''build\((?!deps\): .+)''',
     '''Initial [Cc]ommit.*''',
 ]
-changelog_file = "HISTORY"
 mode = "init"
+
+[tool.semantic_release.changelog.default_templates]
+changelog_file = "HISTORY"
 
 [tool.semantic_release.changelog.environment]
 block_start_string = "{%"
@@ -179,6 +188,7 @@ default = "semantic-release <semantic-release>"
 [tool.semantic_release.remote]
 name = "origin"
 type = "github"
+token = { env = "GITHUB_TOKEN" }
 ignore_token_for_push = false
 insecure = false
 
