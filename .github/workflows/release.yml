@@ -9,8 +9,6 @@ name: Release
 
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
   id-token: write
 
 jobs:
@@ -36,6 +34,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Debug git state
+        if: github.event_name == 'workflow_dispatch'
         run: |
           echo "=== Tags ==="
           git tag -l
