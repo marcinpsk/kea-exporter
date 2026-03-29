@@ -1,69 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2025 Marcin Zieba <marcinpsk@gmail.com>
 name: Release
 
 "on":
-  workflow_dispatch:  # manual trigger
   push:
     branches:
-      - staging
+      - main
 
-permissions: {}
+permissions:
+  contents: write
+  id-token: write
 
 jobs:
   semantic-release:
     name: Semantic Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # to be able to publish a GitHub release
-      issues: write # to be able to comment on released issues
-      pull-requests: write # to be able to comment on released pull requests
-      id-token: write # to enable use of OIDC for trusted publishing and npm provenance
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --group dev
+
+      - name: Debug git state
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "=== Tags ==="
+          git tag -l
+          echo "=== Branch ==="
+          git branch -v
+          echo "=== Last 12 commits ==="
+          git log --oneline -12
+          echo "=== semantic-release --print ==="
+          uv run semantic-release version --print || echo "print failed"
 
       - name: Run semantic-release
-        id: semantic_release
+        id: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: uv run semantic-release version --changelog --push
-
-      - name: Create Pull Request to main
-        if: steps.semantic_release.outcome == 'success'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          # Check if there's already an open PR from staging to main
-          existing_pr=$(gh pr list --base main --head staging --state open --json number -q '.[0].number // empty')
-
-          if [ -z "$existing_pr" ]; then
-            # Fetch latest tags from remote
-            git fetch --tags origin
-
-            # Get the latest release tag for PR title/body
-            latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "staging")
-
-            # Create PR from staging to main
-            gh pr create \
-              --base main \
-              --head staging \
-              --title "Release: $latest_tag" \
-              --body "Automated release PR created after successful semantic-release on staging branch.
-
-          This PR includes version bumps, changelog updates, and release commits from the staging branch.
-
-          **Release Tag:** $latest_tag
-          Please review and merge to complete the release process." \
-              --label "release" || echo "PR creation failed, may already exist"
+          BEFORE=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          uv run semantic-release -vv version --changelog --push
+          AFTER=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "released=true" >> $GITHUB_OUTPUT
+            echo "tag=$AFTER" >> $GITHUB_OUTPUT
           else
-            echo "PR #$existing_pr already exists from staging to main, skipping creation"
+            echo "released=false" >> $GITHUB_OUTPUT
           fi
+
+  publish:
+    name: Publish to PyPI
+    needs: semantic-release
+    if: needs.semantic-release.outputs.released == 'true'
+    uses: ./.github/workflows/pypi.yml
+    with:
+      tag: ${{ needs.semantic-release.outputs.tag }}
+    permissions:
+      id-token: write
+      contents: read
+
+  docker:
+    name: Publish Docker images
+    needs: semantic-release
+    if: needs.semantic-release.outputs.released == 'true'
+    uses: ./.github/workflows/docker.yml
+    with:
+      tag: ${{ needs.semantic-release.outputs.tag }}
+    permissions:
+      contents: read
+      packages: write
