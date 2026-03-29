@@ -1,6 +1,9 @@
-from typing import Any, Optional
+from __future__ import annotations
 
+import sys
+from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
+
 import requests
 
 from kea_exporter import DHCPVersion
@@ -8,7 +11,12 @@ from kea_exporter import DHCPVersion
 
 class KeaHTTPClient:
     def __init__(
-        self, target: str, client_cert: Optional[str], client_key: Optional[str], timeout: int = 10, **_kwargs: Any
+        self,
+        target: str,
+        client_cert: str | None = None,
+        client_key: str | None = None,
+        timeout: int = 10,
+        **_kwargs: Any,
     ) -> None:
         # kwargs allows passing additional arguments from CLI without breaking
         # this class
@@ -57,11 +65,10 @@ class KeaHTTPClient:
             self._server_id = target
             self._auth = None
 
-        if client_cert and client_key:
-            self._cert = (
-                client_cert,
-                client_key,
-            )
+        if client_cert or client_key:
+            if not (client_cert and client_key):
+                raise ValueError("Both client_cert and client_key must be provided for mutual TLS")
+            self._cert = (client_cert, client_key)
         else:
             self._cert = None
 
@@ -91,7 +98,16 @@ class KeaHTTPClient:
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
+        r.raise_for_status()
         config = r.json()
+
+        # Validate Kea RPC response shape before accessing payload
+        if not isinstance(config, list) or not config or not isinstance(config[0], dict) or "result" not in config[0]:
+            raise ValueError(f"Kea config-get returned malformed response: {config!r}")
+        if config[0]["result"] != 0:
+            error_text = config[0].get("text") or f"result={config[0]['result']}"
+            raise ValueError(f"Kea config-get failed: {error_text}")
+
         config_args = config[0].get("arguments", {})
 
         # Try Control Agent discovery first (legacy)
@@ -122,16 +138,23 @@ class KeaHTTPClient:
                     else:
                         self.modules.append(service)
 
+    @staticmethod
+    def _collect_subnets(dhcp_config, subnet_key):
+        """Yield all subnets from top-level and shared-networks in a DHCP config section."""
+        yield from dhcp_config.get(subnet_key, [])
+        for network in dhcp_config.get("shared-networks", []):
+            yield from network.get(subnet_key, [])
+
     def load_subnets(self):
-        # Only load subnets for DHCP services (DDNS doesn't have subnets)
         """
         Load IPv4 and IPv6 subnet definitions for configured DHCP modules
         into the instance maps.
 
         Fetches configuration for any DHCP modules present in self.modules
-        (only "dhcp4" and "dhcp6" are considered) and updates self.subnets
+        (only "dhcp4" and "dhcp6" are considered) and replaces self.subnets
         with IPv4 subnet entries keyed by their `id` and self.subnets6 with
-        IPv6 subnet entries keyed by their `id`. If no DHCP modules are
+        IPv6 subnet entries keyed by their `id`. Includes subnets from both
+        top-level configuration and shared-networks. If no DHCP modules are
         configured, the method returns without modifying state.
         """
         dhcp_modules = [m for m in self.modules if m in ["dhcp4", "dhcp6"]]
@@ -146,15 +169,33 @@ class KeaHTTPClient:
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
+        r.raise_for_status()
         config = r.json()
+
+        new_subnets = {}
+        new_subnets6 = {}
+        dhcp4_seen = False
+        dhcp6_seen = False
         for module in config:
-            # Skip non-dict responses (e.g., error strings)
             if not isinstance(module, dict):
                 continue
-            for subnet in module.get("arguments", {}).get("Dhcp4", {}).get("subnet4", []):
-                self.subnets.update({subnet["id"]: subnet})
-            for subnet in module.get("arguments", {}).get("Dhcp6", {}).get("subnet6", []):
-                self.subnets6.update({subnet["id"]: subnet})
+            if "result" not in module:
+                raise ValueError(f"Kea config-get returned malformed subnet entry: {module!r}")
+            if module["result"] != 0:
+                continue
+            args = module.get("arguments", {})
+
+            if "Dhcp4" in args:
+                dhcp4_seen = True
+                new_subnets.update({s["id"]: s for s in self._collect_subnets(args["Dhcp4"], "subnet4") if "id" in s})
+            if "Dhcp6" in args:
+                dhcp6_seen = True
+                new_subnets6.update({s["id"]: s for s in self._collect_subnets(args["Dhcp6"], "subnet6") if "id" in s})
+
+        if dhcp4_seen:
+            self.subnets = new_subnets
+        if dhcp6_seen:
+            self.subnets6 = new_subnets6
 
     def stats(self):
         # Reload subnets on update in case of configurational update
@@ -180,8 +221,17 @@ class KeaHTTPClient:
                 - subnets (dict): mapping of subnet id to subnet definition
                   (empty for DDNS).
         """
-        self.load_subnets()
-        # Note for future testing: pipe curl output to jq for an easier read
+        # Reload subnets on every scrape to pick up runtime config changes
+        # (e.g. subnets added/removed via config-set). This costs one extra
+        # HTTP request per scrape but avoids stale subnet labels.
+        # Best-effort: don't abort the scrape if subnet refresh fails.
+        try:
+            self.load_subnets()
+        except Exception as e:
+            print(
+                f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
         r = requests.post(
             self._target,
             cert=self._cert,
@@ -194,6 +244,7 @@ class KeaHTTPClient:
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
+        r.raise_for_status()
         response = r.json()
 
         for index, module in enumerate(self.modules):
@@ -209,6 +260,17 @@ class KeaHTTPClient:
             else:
                 continue
 
-            arguments = response[index].get("arguments", {})
+            if index >= len(response):
+                raise ValueError(
+                    f"Kea statistic-get-all response is missing entry for module {module!r} at index {index}"
+                )
+            entry = response[index]
+            # Validate per-module entry shape
+            if not isinstance(entry, dict) or "result" not in entry:
+                raise ValueError(f"Kea statistic-get-all returned malformed entry for module {module!r}: {entry!r}")
+            # Skip modules where Kea reported an error
+            if entry["result"] != 0:
+                continue
+            arguments = entry.get("arguments", {})
 
             yield self._server_id, dhcp_version, arguments, subnets

@@ -65,11 +65,8 @@ class Exporter:
         # track unhandled metric keys, to notify only once
         self.unhandled_metrics = set()
 
-        # track missing info, to notify only once
-        self.subnet_missing_info_sent = {
-            DHCPVersion.DHCP4: [],
-            DHCPVersion.DHCP6: [],
-        }
+        # track missing info per (server_id, dhcp_version), to notify only once
+        self.subnet_missing_info_sent = {}
 
         self.targets = []
         for target in targets:
@@ -83,8 +80,20 @@ class Exporter:
                 else:
                     click.echo(f"Unable to parse target argument: {target}")
                     continue
-            except OSError as ex:
-                click.echo(ex)
+            except Exception as ex:
+                # Log with the target URL stripped of credentials to avoid
+                # leaking secrets in output (requests errors can embed the
+                # original URL including embedded basic-auth credentials).
+                safe_target = target
+                parsed = urlparse(target)
+                if parsed.username:
+                    safe_host = parsed.hostname
+                    if parsed.port:
+                        safe_host = f"{safe_host}:{parsed.port}"
+                    safe_target = f"{parsed.scheme}://{safe_host}{parsed.path}"
+                click.echo(f"Failed to initialize target {safe_target}: {type(ex).__name__}: {ex}")
+                # Keep placeholder so update() can retry initialization
+                self.targets.append({"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs})
                 continue
 
             self.targets.append(client)
@@ -96,11 +105,39 @@ class Exporter:
 
         Iterates each configured client, retrieves that client's reported
         metric responses, and processes each response so the exporter's
-        metric gauges reflect the latest values.
+        metric gauges reflect the latest values. Uninitialized targets
+        (from failed client creation) are retried each update cycle.
         """
-        for target in self.targets:
-            for response in target.stats():
-                self.parse_metrics(*response)
+        for i, target in enumerate(self.targets):
+            # Retry uninitialized targets
+            if isinstance(target, dict) and target.get("client") is None:
+                raw = target["target"]
+                url = urlparse(raw)
+                try:
+                    if url.scheme:
+                        client = KeaHTTPClient(raw, **target["kwargs"])
+                    elif url.path:
+                        client = KeaSocketClient(raw, **target["kwargs"])
+                    else:
+                        continue
+                    self.targets[i] = client
+                    target = client
+                    click.echo(
+                        f"Successfully initialized previously failed target: {getattr(client, '_server_id', raw)}"
+                    )
+                except Exception as ex:
+                    target["last_error"] = str(ex)
+                    continue
+
+            try:
+                for response in target.stats():
+                    self.parse_metrics(*response)
+            except Exception as ex:
+                click.echo(
+                    f"Failed to collect metrics from {getattr(target, '_server_id', target)}: "
+                    f"{type(ex).__name__}: {ex}",
+                    err=True,
+                )
 
     def setup_dhcp4_metrics(self):
         """
@@ -598,34 +635,94 @@ class Exporter:
         # Pattern to match per-key metrics: key[domain.name.].metric-name
         self.ddns_key_pattern = re.compile(r"^key\[(?P<key>[^\]]+)\]\.(?P<metric>.+)$")
 
+    def _resolve_subnet_labels(self, key, subnet_match, server_id, dhcp_version, subnets, subnet_ignore, labels):
+        """Resolve subnet/pool context from a subnet pattern match.
+
+        Returns (resolved_key, labels) on success, or None to skip this metric.
+        """
+        subnet_id = int(subnet_match.group("subnet_id"))
+        pool_index = subnet_match.group("pool_index")
+        pool_metric = subnet_match.group("pool_metric")
+        subnet_metric = subnet_match.group("subnet_metric")
+
+        if pool_metric in subnet_ignore or subnet_metric in subnet_ignore:
+            return None
+
+        subnet_data = subnets.get(subnet_id, [])
+        if not subnet_data:
+            cache_key = (server_id, dhcp_version)
+            missing_info = self.subnet_missing_info_sent.setdefault(cache_key, set())
+            if subnet_id not in missing_info:
+                missing_info.add(subnet_id)
+                click.echo(
+                    f"Ignoring metric because subnet vanished from configuration: {dhcp_version.name=}, {subnet_id=}",
+                    file=sys.stderr,
+                )
+            return None
+
+        labels["subnet"] = subnet_data.get("subnet")
+        labels["subnet_id"] = subnet_id
+
+        if pool_index:
+            pool_index = int(pool_index)
+            subnet_pools = [pool.get("pool") for pool in subnet_data.get("pools", [])]
+
+            if len(subnet_pools) <= pool_index:
+                cache_key = (server_id, dhcp_version)
+                missing_info = self.subnet_missing_info_sent.setdefault(cache_key, set())
+                missing_key = f"{subnet_id}-{pool_index}"
+                if missing_key not in missing_info:
+                    missing_info.add(missing_key)
+                    click.echo(
+                        "Ignoring metric because subnet vanished from "
+                        f"configuration: {dhcp_version.name=}, "
+                        f"{subnet_id=}, {pool_index=}",
+                        file=sys.stderr,
+                    )
+                return None
+            return pool_metric, labels | {"pool": subnet_pools[pool_index]}
+        else:
+            return subnet_metric, labels | {"pool": ""}
+
+    def _handle_ddns_per_key(self, key, value, labels):
+        """Handle DDNS per-key metrics. Returns True if handled, False otherwise."""
+        key_match = self.ddns_key_pattern.match(key)
+        if not key_match:
+            return False
+
+        key_name = key_match.group("key")
+        metric_name = key_match.group("metric")
+
+        metric_key = self.ddns_per_key_map.get(metric_name)
+        if metric_key is None:
+            self._report_unhandled(
+                key,
+                f"Unhandled DDNS per-key metric '{key}' "
+                "please file an issue at https://github.com/marcinpsk/kea-exporter",
+            )
+            return True
+
+        metric = self.metrics_ddns[metric_key]
+        labels["key"] = key_name
+        self._set_metric(metric, labels, value)
+        return True
+
+    @staticmethod
+    def _set_metric(metric, labels, value):
+        """Filter labels to those configured on the metric and set the value."""
+        # _labelnames is a private attribute of prometheus_client.Gauge but
+        # there is no public accessor; access is centralised here.
+        filtered = {k: v for k, v in labels.items() if k in metric._labelnames}
+        metric.labels(**filtered).set(value)
+
+    def _report_unhandled(self, key, message):
+        """Report an unhandled metric key once."""
+        if key not in self.unhandled_metrics:
+            click.echo(message)
+            self.unhandled_metrics.add(key)
+
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
-        # Determine configuration based on DHCP version
-        """
-        Parse and export KEA metrics into Prometheus Gauges with
-        appropriate labels.
-
-        Processes a mapping of raw KEA metric keys to values for a given
-        server and DHCP version, resolving subnet/pool context when keys
-        match the subnet pattern, handling DDNS per-key metrics as a
-        special case, and setting the corresponding Prometheus gauge labels
-        and values. Unknown metrics and missing subnet/pool context are
-        reported once via stderr output and tracked to avoid duplicate
-        messages.
-
-        Parameters:
-            server (str): Identifier of the source server; added to
-                exported metric labels as `"server"`.
-            dhcp_version (DHCPVersion): Enumeration value indicating which
-                metric mappings and ignores to use (DHCP4, DHCP6, or DDNS).
-            arguments (dict): Mapping of metric key -> metric data as
-                returned by the KEA stats API; each value is expected to be
-                an indexable sequence where `data[0][0]` yields the numeric
-                metric value.
-            subnets (dict): Mapping of subnet_id (int) -> subnet metadata
-                dict (contains keys like `"subnet"` and `"pools"`) used to
-                resolve subnet and pool labels when the metric key encodes
-                subnet/pool context.
-        """
+        """Parse KEA metrics and export them as Prometheus Gauges."""
         if dhcp_version is DHCPVersion.DHCP4:
             metrics_map = self.metrics_dhcp4_map
             metrics = self.metrics_dhcp4
@@ -645,110 +742,34 @@ class Exporter:
             return
 
         for key, data in arguments.items():
-            # Check global ignore list
             if key in global_ignore:
                 continue
 
+            if not isinstance(data, list) or not data:
+                continue
             value, _ = data[0]
             labels = {"server": server}
 
             subnet_match = self.subnet_pattern.match(key)
             if subnet_match:
-                subnet_id = int(subnet_match.group("subnet_id"))
-                pool_index = subnet_match.group("pool_index")
-                pool_metric = subnet_match.group("pool_metric")
-                subnet_metric = subnet_match.group("subnet_metric")
-
-                # Check subnet ignore list
-                if pool_metric in subnet_ignore or subnet_metric in subnet_ignore:
+                result = self._resolve_subnet_labels(
+                    key, subnet_match, server, dhcp_version, subnets, subnet_ignore, labels
+                )
+                if result is None:
                     continue
+                key, labels = result
 
-                subnet_data = subnets.get(subnet_id, [])
-                if not subnet_data:
-                    missing_info = self.subnet_missing_info_sent.get(dhcp_version, [])
-                    if subnet_id not in missing_info:
-                        missing_info.append(subnet_id)
-                        click.echo(
-                            "Ignoring metric because subnet vanished from "
-                            f"configuration: {dhcp_version.name=}, "
-                            f"{subnet_id=}",
-                            file=sys.stderr,
-                        )
-                    continue
-
-                labels["subnet"] = subnet_data.get("subnet")
-                labels["subnet_id"] = subnet_id
-
-                # Check if subnet matches the pool_index
-                if pool_index:
-                    # Matched for subnet pool metrics
-                    pool_index = int(pool_index)
-                    subnet_pools = [pool.get("pool") for pool in subnet_data.get("pools", [])]
-
-                    if len(subnet_pools) <= pool_index:
-                        missing_info = self.subnet_missing_info_sent.get(dhcp_version, [])
-                        missing_key = f"{subnet_id}-{pool_index}"
-                        if missing_key not in missing_info:
-                            missing_info.append(missing_key)
-                            click.echo(
-                                "Ignoring metric because subnet vanished from "
-                                f"configuration: {dhcp_version.name=}, "
-                                f"{subnet_id=}, {pool_index=}",
-                                file=sys.stderr,
-                            )
-                        continue
-                    key = pool_metric
-                    labels["pool"] = subnet_pools[pool_index]
-                else:
-                    # Matched for subnet metrics
-                    key = subnet_metric
-                    labels["pool"] = ""
-
-            # Handle DDNS per-key metrics (special case)
-            if dhcp_version is DHCPVersion.DDNS:
-                key_match = self.ddns_key_pattern.match(key)
-                if key_match:
-                    key_name = key_match.group("key")
-                    metric_name = key_match.group("metric")
-
-                    metric_key = self.ddns_per_key_map.get(metric_name)
-                    if metric_key is None:
-                        # Unknown per-key metric
-                        if key not in self.unhandled_metrics:
-                            click.echo(
-                                f"Unhandled DDNS per-key metric '{key}' "
-                                "please file an issue at https://github.com/"
-                                "marcinpsk/kea-exporter"
-                            )
-                            self.unhandled_metrics.add(key)
-                        continue
-
-                    metric = self.metrics_ddns[metric_key]
-                    labels["key"] = key_name
-
-                    # Filter labels and set metric
-                    labels = {k: v for k, v in labels.items() if k in metric._labelnames}
-                    metric.labels(**labels).set(value)
-                    continue
+            if dhcp_version is DHCPVersion.DDNS and self._handle_ddns_per_key(key, value, labels):
+                continue
 
             # Handle standard metrics
-            try:
-                metric_info = metrics_map[key]
-            except KeyError:
-                if key not in self.unhandled_metrics:
-                    click.echo(
-                        f"Unhandled metric '{key}' please file an issue at " "https://github.com/marcinpsk/kea-exporter"
-                    )
-                    self.unhandled_metrics.add(key)
+            metric_info = metrics_map.get(key)
+            if metric_info is None:
+                self._report_unhandled(
+                    key, f"Unhandled metric '{key}' please file an issue at https://github.com/marcinpsk/kea-exporter"
+                )
                 continue
 
             metric = metrics[metric_info["metric"]]
-
-            # merge static and dynamic labels
             labels.update(metric_info.get("labels", {}))
-
-            # Filter labels that are not configured for the metric
-            labels = {key: val for key, val in labels.items() if key in metric._labelnames}
-
-            # export labels and value
-            metric.labels(**labels).set(value)
+            self._set_metric(metric, labels, value)

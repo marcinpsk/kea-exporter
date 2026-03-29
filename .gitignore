@@ -8,11 +8,6 @@ dist
 .ropeproject
 .idea/
 
-.pdm.toml
-.pdm-python
-__pypackages__
-
-.pre-commit-config.yaml
-
 .direnv
+.envrc
 .venv

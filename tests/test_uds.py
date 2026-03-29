@@ -2,13 +2,13 @@
 Tests for kea_exporter.uds module
 """
 
+import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
-import os
-import json
 
-from kea_exporter.uds import KeaSocketClient, KeaConfigError
 from kea_exporter import DHCPVersion
+from kea_exporter.uds import KeaConfigError, KeaSocketClient
 
 
 class TestKeaSocketClientInit(unittest.TestCase):
@@ -56,7 +56,7 @@ class TestKeaSocketClientInit(unittest.TestCase):
         self.assertIsNone(client.version)
         self.assertIsNone(client.config)
         self.assertIsNone(client.subnets)
-        self.assertEqual(client.subnet_missing_info_sent, [])
+        self.assertEqual(client.subnet_missing_info_sent, set())
         self.assertIsNone(client.dhcp_version)
 
     @patch("os.access")
@@ -123,8 +123,51 @@ class TestKeaSocketClientQuery(unittest.TestCase):
 
         client = KeaSocketClient("/path/to/socket")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as ctx:
             client.query("failing-command")
+        self.assertIn("Error message", str(ctx.exception))
+
+    @patch("socket.socket")
+    @patch("os.access")
+    @patch("os.path.abspath")
+    def test_query_sets_socket_timeout(self, mock_abspath, mock_access, mock_socket_class):
+        """Test that query sets a timeout on the socket"""
+        mock_access.return_value = True
+        mock_abspath.return_value = "/path/to/socket"
+
+        mock_sock = MagicMock()
+        mock_socket_class.return_value.__enter__.return_value = mock_sock
+
+        mock_file = MagicMock()
+        mock_file.read.return_value = json.dumps({"result": 0, "arguments": {}})
+        mock_sock.makefile.return_value = mock_file
+
+        client = KeaSocketClient("/path/to/socket")
+        client.query("test-command")
+
+        mock_sock.settimeout.assert_called_once_with(10)
+
+    @patch("socket.socket")
+    @patch("os.access")
+    @patch("os.path.abspath")
+    def test_query_failure_without_text(self, mock_abspath, mock_access, mock_socket_class):
+        """Test query failure message when no text field in response"""
+        mock_access.return_value = True
+        mock_abspath.return_value = "/path/to/socket"
+
+        mock_sock = MagicMock()
+        mock_socket_class.return_value.__enter__.return_value = mock_sock
+
+        mock_file = MagicMock()
+        mock_file.read.return_value = json.dumps({"result": 2})
+        mock_sock.makefile.return_value = mock_file
+
+        client = KeaSocketClient("/path/to/socket")
+
+        with self.assertRaises(ValueError) as ctx:
+            client.query("bad-command")
+        self.assertIn("bad-command", str(ctx.exception))
+        self.assertIn("result 2", str(ctx.exception))
 
 
 class TestKeaSocketClientReload(unittest.TestCase):

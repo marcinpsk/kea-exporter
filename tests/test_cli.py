@@ -2,6 +2,8 @@
 Tests for kea_exporter.cli module
 """
 
+import os
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -300,9 +302,6 @@ class TestCLIOptions(unittest.TestCase):
         runner = CliRunner()
 
         # Create temporary files for testing
-        import tempfile
-        import os
-
         cert_file = tempfile.NamedTemporaryFile(delete=False)
         key_file = tempfile.NamedTemporaryFile(delete=False)
         cert_path = cert_file.name

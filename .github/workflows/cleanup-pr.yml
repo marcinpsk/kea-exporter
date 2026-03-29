@@ -3,6 +3,8 @@ name: Cleanup old PR packages
 on:
   workflow_dispatch:  # manual trigger
 
+permissions: {}
+
 jobs:
   cleanup:
     permissions:
