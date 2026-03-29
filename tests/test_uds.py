@@ -56,7 +56,7 @@ class TestKeaSocketClientInit(unittest.TestCase):
         self.assertIsNone(client.version)
         self.assertIsNone(client.config)
         self.assertIsNone(client.subnets)
-        self.assertEqual(client.subnet_missing_info_sent, [])
+        self.assertEqual(client.subnet_missing_info_sent, set())
         self.assertIsNone(client.dhcp_version)
 
     @patch("os.access")

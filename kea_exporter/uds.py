@@ -48,7 +48,7 @@ class KeaSocketClient:
         self.version = None
         self.config = None
         self.subnets = None
-        self.subnet_missing_info_sent = []
+        self.subnet_missing_info_sent = set()
         self.dhcp_version = None
 
     def query(self, command):

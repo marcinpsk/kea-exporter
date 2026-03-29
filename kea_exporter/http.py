@@ -1,4 +1,6 @@
-from typing import Any, Optional
+from __future__ import annotations
+
+from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
 
 import requests
@@ -8,7 +10,7 @@ from kea_exporter import DHCPVersion
 
 class KeaHTTPClient:
     def __init__(
-        self, target: str, client_cert: Optional[str], client_key: Optional[str], timeout: int = 10, **_kwargs: Any
+        self, target: str, client_cert: str | None, client_key: str | None, timeout: int = 10, **_kwargs: Any
     ) -> None:
         # kwargs allows passing additional arguments from CLI without breaking
         # this class

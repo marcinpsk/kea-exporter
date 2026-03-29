@@ -517,6 +517,111 @@ class TestExporterParseMetrics(unittest.TestCase):
         # Should not raise an error about unhandled metric
         exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
 
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_unknown_dhcp_version_returns_early(self, mock_http):
+        """Test that an unknown dhcp_version causes early return"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        # Should not raise - just return
+        exporter.parse_metrics("server", "UNKNOWN", {"key": [[1, "ts"]]}, {})
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_subnet_metric(self, mock_http):
+        """Test parsing a subnet-level metric with subnet context"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        subnets = {1: {"subnet": "192.168.1.0/24", "pools": []}}
+        arguments = {"subnet[1].assigned-addresses": [[42, "2024-01-01 00:00:00"]]}
+
+        mock_metric = Mock()
+        mock_metric._labelnames = ["server", "subnet", "subnet_id", "pool"]
+        mock_metric.labels.return_value = mock_metric
+        exporter.metrics_dhcp4["addresses_assigned_total"] = mock_metric
+
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
+
+        mock_metric.labels.assert_called_once_with(server=server_id, subnet="192.168.1.0/24", subnet_id=1, pool="")
+        mock_metric.set.assert_called_once_with(42)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_pool_metric(self, mock_http):
+        """Test parsing a pool-level metric with pool context"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        subnets = {1: {"subnet": "192.168.1.0/24", "pools": [{"pool": "192.168.1.10-192.168.1.50"}]}}
+        arguments = {"subnet[1].pool[0].assigned-addresses": [[10, "2024-01-01 00:00:00"]]}
+
+        mock_metric = Mock()
+        mock_metric._labelnames = ["server", "subnet", "subnet_id", "pool"]
+        mock_metric.labels.return_value = mock_metric
+        exporter.metrics_dhcp4["addresses_assigned_total"] = mock_metric
+
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
+
+        mock_metric.labels.assert_called_once_with(
+            server=server_id, subnet="192.168.1.0/24", subnet_id=1, pool="192.168.1.10-192.168.1.50"
+        )
+        mock_metric.set.assert_called_once_with(10)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_parse_metrics_missing_subnet(self, mock_echo, mock_http):
+        """Test that a metric for a vanished subnet is skipped and logged once"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        subnets = {}  # subnet 99 not present
+        arguments = {"subnet[99].assigned-addresses": [[1, "2024-01-01 00:00:00"]]}
+
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
+        mock_echo.assert_called_once()
+        self.assertIn("subnet vanished", mock_echo.call_args[0][0])
+
+        # Second call should not log again
+        mock_echo.reset_mock()
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
+        mock_echo.assert_not_called()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_parse_metrics_missing_pool(self, mock_echo, mock_http):
+        """Test that a metric for a vanished pool is skipped and logged once"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        subnets = {1: {"subnet": "192.168.1.0/24", "pools": []}}  # no pools
+        arguments = {"subnet[1].pool[0].assigned-addresses": [[1, "2024-01-01 00:00:00"]]}
+
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
+        mock_echo.assert_called_once()
+        self.assertIn("subnet vanished", mock_echo.call_args[0][0])
+
+        # Second call should not log again
+        mock_echo.reset_mock()
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
+        mock_echo.assert_not_called()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_subnet_ignore_list(self, mock_http):
+        """Test that subnet-level ignore list is respected"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        ignored = exporter.metrics_dhcp4_subnet_ignore[0]
+        subnets = {1: {"subnet": "192.168.1.0/24", "pools": []}}
+        arguments = {f"subnet[1].{ignored}": [[1, "2024-01-01 00:00:00"]]}
+
+        # Should not raise or try to export
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
+
 
 class TestExporterUpdate(unittest.TestCase):
     """Test Exporter.update method"""
