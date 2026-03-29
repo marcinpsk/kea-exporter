@@ -300,8 +300,8 @@ class TestCLIOptions(unittest.TestCase):
         runner = CliRunner()
 
         # Create temporary files for testing
-        import tempfile
         import os
+        import tempfile
 
         cert_file = tempfile.NamedTemporaryFile(delete=False)
         key_file = tempfile.NamedTemporaryFile(delete=False)

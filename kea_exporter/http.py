@@ -1,6 +1,6 @@
 from typing import Any, Optional
-
 from urllib.parse import unquote, urlparse, urlunparse
+
 import requests
 
 from kea_exporter import DHCPVersion

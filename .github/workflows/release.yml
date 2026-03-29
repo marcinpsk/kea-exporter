@@ -20,19 +20,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up PDM
-        uses: pdm-project/setup-pdm@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pdm install --dev
+        run: uv sync
 
       - name: Run semantic-release
         id: semantic_release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: pdm run semantic-release version --changelog --push
+        run: uv run semantic-release version --changelog --push
 
       - name: Create Pull Request to main
         if: steps.semantic_release.outcome == 'success'

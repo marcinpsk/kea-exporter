@@ -2,7 +2,6 @@ import json
 import os
 import socket
 
-
 from kea_exporter import DHCPVersion
 
 
@@ -40,7 +39,7 @@ class KeaSocketClient:
         if not os.access(sock_path, os.F_OK):
             raise FileNotFoundError(f"Unix domain socket does not exist at {sock_path}")
         if not os.access(sock_path, os.R_OK | os.W_OK):
-            raise PermissionError(f"No read/write permissions on Unix domain socket at " f"{sock_path}")
+            raise PermissionError(f"No read/write permissions on Unix domain socket at {sock_path}")
 
         self.sock_path = os.path.abspath(sock_path)
         # Use socket path as server identifier

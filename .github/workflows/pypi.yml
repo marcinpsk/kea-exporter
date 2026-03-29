@@ -3,7 +3,6 @@ on:
   push:
     tags: ["*"]
 
-# https://pdm-project.org/latest/usage/publish/
 jobs:
   pypi-publish:
     if: github.repository == 'mweinelt/kea-exporter'
@@ -13,7 +12,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v3
-      - uses: pdm-project/setup-pdm@v3
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - name: Build package
+        run: uv build
       - name: Publish package distributions to PyPI
-        run: pdm publish
+        run: uv publish

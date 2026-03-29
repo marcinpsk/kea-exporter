@@ -15,7 +15,6 @@
           pre-commit-check = pre-commit-hooks.lib.${system}.run {
             src = ./.;
             hooks = {
-              isort.enable = true;
               ruff.enable = true;
               ruff-format = {
                 enable = true;
@@ -35,8 +34,7 @@
           inherit (self.checks.${system}.pre-commit-check) shellHook;
 
           buildInputs = [
-            isort
-            pdm
+            uv
             ruff
           ] ++ (with python3.pkgs; [
             typing-extensions

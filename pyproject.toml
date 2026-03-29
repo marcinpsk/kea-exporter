@@ -1,6 +1,6 @@
 [build-system]
-requires = ["pdm-backend"]
-build-backend = "pdm.backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 # PEP 621 project metadata
@@ -46,9 +46,6 @@ upstream = "https://github.com/mweinelt/kea-exporter"
 [project.scripts]
 kea-exporter = "kea_exporter.__main__:cli"
 
-[tool.black]
-line-length = 120
-
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
 exclude = [
@@ -88,7 +85,7 @@ target-version = 'py310'
 # Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`) codes by default.
 # Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
 # McCabe complexity (`C901`) by default.
-select = ["E4", "E7", "E9", "F", "E501"]
+select = ["E4", "E7", "E9", "F", "E501", "I", "C901"]
 ignore = []
 
 # Allow fix for all enabled rules (when `--fix`) is provided.
@@ -97,6 +94,9 @@ unfixable = []
 
 # Allow unused variables when underscore-prefixed.
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
 [tool.ruff.format]
 quote-style = "double"
@@ -109,9 +109,9 @@ docstring-code-line-length = "dynamic"
 [dependency-groups]
 dev = [
     "ruff==0.14.7",
-    "black==25.11.0",
     "coverage[toml]>=7.12.0",
     "python-semantic-release>=10.5.2",
+    "pre-commit>=4.0.0",
 ]
 
 [tool.coverage.run]
@@ -126,7 +126,7 @@ show_missing = true
 version_toml = ["pyproject.toml:project.version"]
 version_variables = ["kea_exporter/__init__.py:__version__"]
 branch = "staging"
-build_command = "pdm build"
+build_command = "uv build"
 commit_message = "chore(release): {version} [skip ci]"
 major_on_zero = true
 allow_zero_version = true

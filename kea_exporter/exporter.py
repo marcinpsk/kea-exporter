@@ -737,7 +737,7 @@ class Exporter:
             except KeyError:
                 if key not in self.unhandled_metrics:
                     click.echo(
-                        f"Unhandled metric '{key}' please file an issue at " "https://github.com/marcinpsk/kea-exporter"
+                        f"Unhandled metric '{key}' please file an issue at https://github.com/marcinpsk/kea-exporter"
                     )
                     self.unhandled_metrics.add(key)
                 continue

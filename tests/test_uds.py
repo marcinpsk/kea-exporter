@@ -2,13 +2,13 @@
 Tests for kea_exporter.uds module
 """
 
+import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
-import os
-import json
 
-from kea_exporter.uds import KeaSocketClient, KeaConfigError
 from kea_exporter import DHCPVersion
+from kea_exporter.uds import KeaConfigError, KeaSocketClient
 
 
 class TestKeaSocketClientInit(unittest.TestCase):

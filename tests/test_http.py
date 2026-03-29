@@ -5,8 +5,8 @@ Tests for kea_exporter.http module
 import unittest
 from unittest.mock import Mock, patch
 
-from kea_exporter.http import KeaHTTPClient
 from kea_exporter import DHCPVersion
+from kea_exporter.http import KeaHTTPClient
 
 
 class TestKeaHTTPClientInit(unittest.TestCase):
