@@ -1,5 +1,39 @@
 
 
+0.7.8
+
+
+
+ - update release.yml
+
+ - guard subnet id access in uds.py and restore TestURLParsing class
+
+ - address code review findings
+
+ - stricter Kea RPC validation and bounds check in stats()
+
+ - address PR comments
+
+ - udpate ruff pin to match pre-commit hooks / moved sys import
+
+ - address PR comments
+
+ - update readme / address PR comments
+
+ - address PR comments + add shared_network subnet extraction
+
+ - sanitize credentials in error output and clean up project artifacts
+
+ - add error resilience, HTTP status checks, UDS socket timeout, and workflow permissions
+
+
+
+
+
+
+
+
+
 0.7.7
 
 
