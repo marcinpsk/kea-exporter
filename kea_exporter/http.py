@@ -10,7 +10,12 @@ from kea_exporter import DHCPVersion
 
 class KeaHTTPClient:
     def __init__(
-        self, target: str, client_cert: str | None, client_key: str | None, timeout: int = 10, **_kwargs: Any
+        self,
+        target: str,
+        client_cert: str | None = None,
+        client_key: str | None = None,
+        timeout: int = 10,
+        **_kwargs: Any,
     ) -> None:
         # kwargs allows passing additional arguments from CLI without breaking
         # this class
@@ -203,7 +208,16 @@ class KeaHTTPClient:
         # Reload subnets on every scrape to pick up runtime config changes
         # (e.g. subnets added/removed via config-set). This costs one extra
         # HTTP request per scrape but avoids stale subnet labels.
-        self.load_subnets()
+        # Best-effort: don't abort the scrape if subnet refresh fails.
+        try:
+            self.load_subnets()
+        except Exception as e:
+            import sys
+
+            print(
+                f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
         r = requests.post(
             self._target,
             cert=self._cert,

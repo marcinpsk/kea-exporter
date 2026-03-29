@@ -93,9 +93,7 @@ class Exporter:
                     safe_target = f"{parsed.scheme}://{safe_host}{parsed.path}"
                 click.echo(f"Failed to initialize target {safe_target}: {type(ex).__name__}: {ex}")
                 # Keep placeholder so update() can retry initialization
-                self.targets.append(
-                    {"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs}
-                )
+                self.targets.append({"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs})
                 continue
 
             self.targets.append(client)
@@ -125,8 +123,7 @@ class Exporter:
                     self.targets[i] = client
                     target = client
                     click.echo(
-                        f"Successfully initialized previously failed target: "
-                        f"{getattr(client, '_server_id', raw)}"
+                        f"Successfully initialized previously failed target: {getattr(client, '_server_id', raw)}"
                     )
                 except Exception as ex:
                     target["last_error"] = str(ex)

@@ -60,7 +60,7 @@ class KeaSocketClient:
             response = json.loads(sock.makefile().read(-1))
 
         if response["result"] != 0:
-            raise ValueError(response.get("text", f"Query '{command}' failed with result {response['result']}"))
+            raise ValueError(response.get("text") or f"Query '{command}' failed with result {response['result']}")
 
         return response
 

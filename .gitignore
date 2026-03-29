@@ -9,4 +9,5 @@ dist
 .idea/
 
 .direnv
+.envrc
 .venv
