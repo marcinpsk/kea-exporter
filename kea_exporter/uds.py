@@ -110,16 +110,18 @@ class KeaSocketClient:
         if "Dhcp4" in self.config:
             self.dhcp_version = DHCPVersion.DHCP4
             subnets = self.config["Dhcp4"].get("subnet4", [])
-            self.subnets = {subnet["id"]: subnet for subnet in subnets}
+            self.subnets = {subnet["id"]: subnet for subnet in subnets if "id" in subnet}
             for network in self.config["Dhcp4"].get("shared-networks", []):
                 for subnet in network.get("subnet4", []):
-                    self.subnets[subnet["id"]] = subnet
+                    if "id" in subnet:
+                        self.subnets[subnet["id"]] = subnet
         elif "Dhcp6" in self.config:
             self.dhcp_version = DHCPVersion.DHCP6
             subnets = self.config["Dhcp6"].get("subnet6", [])
-            self.subnets = {subnet["id"]: subnet for subnet in subnets}
+            self.subnets = {subnet["id"]: subnet for subnet in subnets if "id" in subnet}
             for network in self.config["Dhcp6"].get("shared-networks", []):
                 for subnet in network.get("subnet6", []):
-                    self.subnets[subnet["id"]] = subnet
+                    if "id" in subnet:
+                        self.subnets[subnet["id"]] = subnet
         else:
             raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")

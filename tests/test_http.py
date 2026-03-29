@@ -596,6 +596,8 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
             list(client.stats())
         self.assertIn("missing entry", str(ctx.exception))
 
+
+class TestURLParsing(unittest.TestCase):
     """Test URL parsing edge cases"""
 
     @patch("kea_exporter.http.requests.post")
