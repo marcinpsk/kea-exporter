@@ -139,7 +139,7 @@ class KeaHTTPClient:
                     else:
                         self.modules.append(service)
 
-    def load_subnets(self):
+    def load_subnets(self):  # noqa: C901
         # Only load subnets for DHCP services (DDNS doesn't have subnets)
         """
         Load IPv4 and IPv6 subnet definitions for configured DHCP modules
@@ -175,8 +175,11 @@ class KeaHTTPClient:
             # Skip non-dict responses (e.g., error strings)
             if not isinstance(module, dict):
                 continue
+            # Require explicit "result" key — malformed entries raise ValueError
+            if "result" not in module:
+                raise ValueError(f"Kea config-get returned malformed subnet entry: {module!r}")
             # Skip Kea-level error responses
-            if module.get("result", 0) != 0:
+            if module["result"] != 0:
                 continue
             args = module.get("arguments", {})
 
@@ -266,6 +269,10 @@ class KeaHTTPClient:
             else:
                 continue
 
+            if index >= len(response):
+                raise ValueError(
+                    f"Kea statistic-get-all response is missing entry for module {module!r} at index {index}"
+                )
             entry = response[index]
             # Validate per-module entry shape
             if not isinstance(entry, dict) or "result" not in entry:

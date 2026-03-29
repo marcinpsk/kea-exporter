@@ -519,8 +519,83 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
         with self.assertRaises(requests.HTTPError):
             list(client.stats())
 
+    @patch("kea_exporter.http.requests.post")
+    def test_load_modules_raises_on_malformed_kea_payload(self, mock_post):
+        """load_modules() raises ValueError when Kea response is missing 'result' key"""
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = [{"arguments": {}}]
+        mock_post.return_value = mock_response
 
-class TestURLParsing(unittest.TestCase):
+        with self.assertRaises(ValueError) as ctx:
+            KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        self.assertIn("malformed response", str(ctx.exception))
+
+    @patch("kea_exporter.http.requests.post")
+    def test_load_modules_raises_on_kea_error_result(self, mock_post):
+        """load_modules() raises ValueError when Kea returns a non-zero result"""
+        mock_response = Mock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = [{"result": 1, "text": "config not found"}]
+        mock_post.return_value = mock_response
+
+        with self.assertRaises(ValueError) as ctx:
+            KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        self.assertIn("config not found", str(ctx.exception))
+
+    @patch("kea_exporter.http.requests.post")
+    def test_stats_raises_on_malformed_stats_entry(self, mock_post):
+        """stats() raises ValueError when a per-module stats entry is missing 'result'"""
+        config_response = Mock()
+        config_response.raise_for_status.return_value = None
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
+
+        subnets_response = Mock()
+        subnets_response.raise_for_status.return_value = None
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+
+        subnets_reload = Mock()
+        subnets_reload.raise_for_status.return_value = None
+        subnets_reload.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+
+        # Stats entry missing "result" key
+        stats_response = Mock()
+        stats_response.raise_for_status.return_value = None
+        stats_response.json.return_value = [{"arguments": {}}]
+
+        mock_post.side_effect = [config_response, subnets_response, subnets_reload, stats_response]
+
+        client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        with self.assertRaises(ValueError):
+            list(client.stats())
+
+    @patch("kea_exporter.http.requests.post")
+    def test_stats_raises_on_truncated_response(self, mock_post):
+        """stats() raises ValueError when Kea response has fewer entries than modules"""
+        config_response = Mock()
+        config_response.raise_for_status.return_value = None
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
+
+        subnets_response = Mock()
+        subnets_response.raise_for_status.return_value = None
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+
+        subnets_reload = Mock()
+        subnets_reload.raise_for_status.return_value = None
+        subnets_reload.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+
+        # Empty stats response — no entries for any module
+        stats_response = Mock()
+        stats_response.raise_for_status.return_value = None
+        stats_response.json.return_value = []
+
+        mock_post.side_effect = [config_response, subnets_response, subnets_reload, stats_response]
+
+        client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        with self.assertRaises(ValueError) as ctx:
+            list(client.stats())
+        self.assertIn("missing entry", str(ctx.exception))
+
     """Test URL parsing edge cases"""
 
     @patch("kea_exporter.http.requests.post")
