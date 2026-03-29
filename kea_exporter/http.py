@@ -65,11 +65,10 @@ class KeaHTTPClient:
             self._server_id = target
             self._auth = None
 
-        if client_cert and client_key:
-            self._cert = (
-                client_cert,
-                client_key,
-            )
+        if client_cert or client_key:
+            if not (client_cert and client_key):
+                raise ValueError("Both client_cert and client_key must be provided for mutual TLS")
+            self._cert = (client_cert, client_key)
         else:
             self._cert = None
 
@@ -188,10 +187,10 @@ class KeaHTTPClient:
 
             if "Dhcp4" in args:
                 dhcp4_seen = True
-                new_subnets.update({s["id"]: s for s in self._collect_subnets(args["Dhcp4"], "subnet4")})
+                new_subnets.update({s["id"]: s for s in self._collect_subnets(args["Dhcp4"], "subnet4") if "id" in s})
             if "Dhcp6" in args:
                 dhcp6_seen = True
-                new_subnets6.update({s["id"]: s for s in self._collect_subnets(args["Dhcp6"], "subnet6")})
+                new_subnets6.update({s["id"]: s for s in self._collect_subnets(args["Dhcp6"], "subnet6") if "id" in s})
 
         if dhcp4_seen:
             self.subnets = new_subnets

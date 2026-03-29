@@ -745,6 +745,8 @@ class Exporter:
             if key in global_ignore:
                 continue
 
+            if not isinstance(data, list) or not data:
+                continue
             value, _ = data[0]
             labels = {"server": server}
 

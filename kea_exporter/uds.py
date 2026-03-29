@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+from contextlib import closing
 
 from kea_exporter import DHCPVersion
 
@@ -57,7 +58,11 @@ class KeaSocketClient:
             sock.settimeout(self.timeout)
             sock.connect(self.sock_path)
             sock.send(bytes(json.dumps({"command": command}), "utf-8"))
-            response = json.loads(sock.makefile().read(-1))
+            with closing(sock.makefile()) as f:
+                try:
+                    response = json.loads(f.read())
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Kea returned invalid JSON on '{command}': {e}") from e
 
         if response["result"] != 0:
             raise ValueError(response.get("text") or f"Query '{command}' failed with result {response['result']}")
