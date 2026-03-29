@@ -96,7 +96,7 @@ show_missing = true
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
 version_variables = ["kea_exporter/__init__.py:__version__"]
-branch = "staging"
+branch = "main"
 build_command = "uv build"
 commit_message = "chore(release): {version} [skip ci]"
 major_on_zero = true
@@ -160,7 +160,7 @@ default = "semantic-release <semantic-release>"
 [tool.semantic_release.remote]
 name = "origin"
 type = "github"
-token = { env = "GITHUB_TOKEN" }
+token = { env = "RELEASE_TOKEN" }
 ignore_token_for_push = false
 insecure = false
 

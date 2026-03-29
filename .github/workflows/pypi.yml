@@ -2,12 +2,17 @@ name: Build and publish to PyPi
 on:
   push:
     tags: ["*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Git tag to publish'
+        required: false
+        type: string
 
 permissions: {}
 
 jobs:
   pypi-publish:
-    if: github.repository == 'mweinelt/kea-exporter'
     name: Upload release to PyPI
     runs-on: ubuntu-latest
     environment: release
@@ -16,6 +21,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: astral-sh/setup-uv@v7
       - name: Build package
         run: uv build
