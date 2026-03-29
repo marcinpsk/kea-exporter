@@ -83,8 +83,18 @@ class Exporter:
                 else:
                     click.echo(f"Unable to parse target argument: {target}")
                     continue
-            except OSError as ex:
-                click.echo(ex)
+            except Exception as ex:
+                # Log with the target URL stripped of credentials to avoid
+                # leaking secrets in output (requests errors can embed the
+                # original URL including embedded basic-auth credentials).
+                safe_target = target
+                parsed = urlparse(target)
+                if parsed.username:
+                    safe_host = parsed.hostname
+                    if parsed.port:
+                        safe_host = f"{safe_host}:{parsed.port}"
+                    safe_target = f"{parsed.scheme}://{safe_host}{parsed.path}"
+                click.echo(f"Failed to initialize target {safe_target}: {type(ex).__name__}: {ex}")
                 continue
 
             self.targets.append(client)
@@ -103,7 +113,11 @@ class Exporter:
                 for response in target.stats():
                     self.parse_metrics(*response)
             except Exception as ex:
-                click.echo(f"Failed to collect metrics from {getattr(target, '_server_id', target)}: {ex}", err=True)
+                click.echo(
+                    f"Failed to collect metrics from {getattr(target, '_server_id', target)}: "
+                    f"{type(ex).__name__}: {ex}",
+                    err=True,
+                )
 
     def setup_dhcp4_metrics(self):
         """

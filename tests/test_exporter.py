@@ -104,6 +104,20 @@ class TestExporterInit(unittest.TestCase):
         mock_echo.assert_called()
         self.assertEqual(len(exporter.targets), 0)
 
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_init_strips_credentials_from_error(self, mock_echo, mock_http):
+        """Test that credentials are not leaked in error messages"""
+        mock_http.side_effect = ConnectionError("refused")
+
+        exporter = Exporter(targets=["http://admin:s3cret@kea.local:8000/api"], registry=self.registry)
+
+        self.assertEqual(len(exporter.targets), 0)
+        error_msg = mock_echo.call_args[0][0]
+        self.assertNotIn("admin", error_msg)
+        self.assertNotIn("s3cret", error_msg)
+        self.assertIn("kea.local:8000", error_msg)
+
 
 class TestExporterSetupDDNSMetrics(unittest.TestCase):
     """Test DDNS metrics setup (new feature)"""

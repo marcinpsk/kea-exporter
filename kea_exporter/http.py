@@ -184,8 +184,10 @@ class KeaHTTPClient:
                 - subnets (dict): mapping of subnet id to subnet definition
                   (empty for DDNS).
         """
+        # Reload subnets on every scrape to pick up runtime config changes
+        # (e.g. subnets added/removed via config-set). This costs one extra
+        # HTTP request per scrape but avoids stale subnet labels.
         self.load_subnets()
-        # Note for future testing: pipe curl output to jq for an easier read
         r = requests.post(
             self._target,
             cert=self._cert,
