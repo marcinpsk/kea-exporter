@@ -1,8 +1,16 @@
 
 
+0.7.9
+
+
+
+
+
 0.7.8
 
 
+
+ - use inputs.tag to detect release call in Docker workflow
 
  - update release.yml
 
