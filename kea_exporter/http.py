@@ -102,12 +102,11 @@ class KeaHTTPClient:
         r.raise_for_status()
         config = r.json()
 
-        # Check Kea-level command result before accessing payload
-        if not config or not isinstance(config[0], dict) or config[0].get("result", 0) != 0:
-            if config and isinstance(config[0], dict):
-                error_text = config[0].get("text", "unknown error")
-            else:
-                error_text = str(config)
+        # Validate Kea RPC response shape before accessing payload
+        if not isinstance(config, list) or not config or not isinstance(config[0], dict) or "result" not in config[0]:
+            raise ValueError(f"Kea config-get returned malformed response: {config!r}")
+        if config[0]["result"] != 0:
+            error_text = config[0].get("text") or f"result={config[0]['result']}"
             raise ValueError(f"Kea config-get failed: {error_text}")
 
         config_args = config[0].get("arguments", {})
@@ -170,6 +169,8 @@ class KeaHTTPClient:
 
         new_subnets = {}
         new_subnets6 = {}
+        dhcp4_seen = False
+        dhcp6_seen = False
         for module in config:
             # Skip non-dict responses (e.g., error strings)
             if not isinstance(module, dict):
@@ -177,22 +178,30 @@ class KeaHTTPClient:
             # Skip Kea-level error responses
             if module.get("result", 0) != 0:
                 continue
-            dhcp4_config = module.get("arguments", {}).get("Dhcp4", {})
+            args = module.get("arguments", {})
+
+            dhcp4_config = args.get("Dhcp4", {})
+            if "Dhcp4" in args:
+                dhcp4_seen = True
             for subnet in dhcp4_config.get("subnet4", []):
                 new_subnets[subnet["id"]] = subnet
             for network in dhcp4_config.get("shared-networks", []):
                 for subnet in network.get("subnet4", []):
                     new_subnets[subnet["id"]] = subnet
 
-            dhcp6_config = module.get("arguments", {}).get("Dhcp6", {})
+            dhcp6_config = args.get("Dhcp6", {})
+            if "Dhcp6" in args:
+                dhcp6_seen = True
             for subnet in dhcp6_config.get("subnet6", []):
                 new_subnets6[subnet["id"]] = subnet
             for network in dhcp6_config.get("shared-networks", []):
                 for subnet in network.get("subnet6", []):
                     new_subnets6[subnet["id"]] = subnet
 
-        self.subnets = new_subnets
-        self.subnets6 = new_subnets6
+        if dhcp4_seen:
+            self.subnets = new_subnets
+        if dhcp6_seen:
+            self.subnets6 = new_subnets6
 
     def stats(self):
         # Reload subnets on update in case of configurational update
@@ -258,8 +267,11 @@ class KeaHTTPClient:
                 continue
 
             entry = response[index]
-            # Skip Kea-level error responses
-            if not isinstance(entry, dict) or entry.get("result", 0) != 0:
+            # Validate per-module entry shape
+            if not isinstance(entry, dict) or "result" not in entry:
+                raise ValueError(f"Kea statistic-get-all returned malformed entry for module {module!r}: {entry!r}")
+            # Skip modules where Kea reported an error
+            if entry["result"] != 0:
                 continue
             arguments = entry.get("arguments", {})
 

@@ -18,7 +18,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_basic_url(self, mock_post):
         """Test initialization with basic HTTP URL"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
@@ -33,7 +33,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_with_basic_auth(self, mock_post):
         """Test initialization with embedded credentials"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(target="http://user:pass@localhost:8000", client_cert=None, client_key=None)
@@ -47,7 +47,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_with_basic_auth_no_port(self, mock_post):
         """Test initialization with credentials but no explicit port"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(target="http://admin:secret@example.com", client_cert=None, client_key=None)
@@ -60,7 +60,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_with_basic_auth_and_path(self, mock_post):
         """Test initialization with credentials and path"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(target="http://user:pass@localhost:8000/api", client_cert=None, client_key=None)
@@ -72,7 +72,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_with_client_cert(self, mock_post):
         """Test initialization with client certificates"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(
@@ -85,7 +85,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_with_custom_timeout(self, mock_post):
         """Test initialization with custom timeout"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None, timeout=30)
@@ -96,7 +96,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_default_timeout(self, mock_post):
         """Test default timeout value"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
@@ -107,7 +107,7 @@ class TestKeaHTTPClientInit(unittest.TestCase):
     def test_init_calls_load_modules(self, mock_post):
         """Test that initialization calls load_modules"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {"dhcp4": {}}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
         mock_post.return_value = mock_response
 
         KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
@@ -125,6 +125,7 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
         config_response = Mock()
         config_response.json.return_value = [
             {
+                "result": 0,
                 "arguments": {
                     "Control-agent": {
                         "control-sockets": {
@@ -132,14 +133,14 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
                             "dhcp6": {"socket-type": "unix", "socket-name": "/tmp/kea6.sock"},
                         }
                     }
-                }
+                },
             }
         ]
 
         subnets_response = Mock()
         subnets_response.json.return_value = [
-            {"arguments": {"Dhcp4": {"subnet4": []}}},
-            {"arguments": {"Dhcp6": {"subnet6": []}}},
+            {"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}},
+            {"result": 0, "arguments": {"Dhcp6": {"subnet6": []}}},
         ]
 
         mock_post.side_effect = [config_response, subnets_response]
@@ -153,10 +154,10 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
     def test_load_modules_fallback_dhcp4(self, mock_post):
         """Test loading modules via fallback detection for DHCP4"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
         mock_post.side_effect = [config_response, subnets_response]
 
@@ -168,10 +169,10 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
     def test_load_modules_fallback_dhcp6(self, mock_post):
         """Test loading modules via fallback detection for DHCP6"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"Dhcp6": {"subnet6": []}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"Dhcp6": {"subnet6": []}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp6": {"subnet6": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp6": {"subnet6": []}}}]
 
         mock_post.side_effect = [config_response, subnets_response]
 
@@ -183,7 +184,7 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
     def test_load_modules_fallback_ddns(self, mock_post):
         """Test loading modules via fallback detection for DDNS"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"ddns": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"ddns": {}}}]
 
         subnets_response = Mock()
         subnets_response.json.return_value = []
@@ -198,7 +199,7 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
     def test_load_modules_fallback_d2_normalized(self, mock_post):
         """Test that d2 is normalized to ddns"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"d2": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"d2": {}}}]
 
         subnets_response = Mock()
         subnets_response.json.return_value = []
@@ -214,10 +215,10 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
     def test_load_modules_case_insensitive(self, mock_post):
         """Test that module detection is case-insensitive"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"DHCP4": {}, "DDNS": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"DHCP4": {}, "DDNS": {}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
         mock_post.side_effect = [config_response, subnets_response]
 
@@ -230,7 +231,7 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
     def test_load_modules_uses_timeout(self, mock_post):
         """Test that load_modules uses configured timeout"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {}}]
 
         subnets_response = Mock()
         subnets_response.json.return_value = []
@@ -247,7 +248,7 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
     def test_load_modules_uses_auth(self, mock_post):
         """Test that load_modules uses authentication"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {}}]
 
         subnets_response = Mock()
         subnets_response.json.return_value = []
@@ -268,14 +269,15 @@ class TestKeaHTTPClientLoadSubnets(unittest.TestCase):
     def test_load_subnets_dhcp4(self, mock_post):
         """Test loading DHCPv4 subnets"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp4": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
 
         subnets_response = Mock()
         subnets_response.json.return_value = [
             {
+                "result": 0,
                 "arguments": {
                     "Dhcp4": {"subnet4": [{"id": 1, "subnet": "192.168.1.0/24"}, {"id": 2, "subnet": "192.168.2.0/24"}]}
-                }
+                },
             }
         ]
 
@@ -292,16 +294,17 @@ class TestKeaHTTPClientLoadSubnets(unittest.TestCase):
     def test_load_subnets_dhcp6(self, mock_post):
         """Test loading DHCPv6 subnets"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp6": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp6": {}}}]
 
         subnets_response = Mock()
         subnets_response.json.return_value = [
             {
+                "result": 0,
                 "arguments": {
                     "Dhcp6": {
                         "subnet6": [{"id": 10, "subnet": "2001:db8::/64"}, {"id": 11, "subnet": "2001:db8:1::/64"}]
                     }
-                }
+                },
             }
         ]
 
@@ -317,7 +320,7 @@ class TestKeaHTTPClientLoadSubnets(unittest.TestCase):
     def test_load_subnets_ddns_only_no_request(self, mock_post):
         """Test that load_subnets doesn't make request for DDNS-only"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"ddns": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"ddns": {}}}]
 
         mock_post.side_effect = [config_response]
 
@@ -337,14 +340,14 @@ class TestKeaHTTPClientStats(unittest.TestCase):
     def test_stats_dhcp4(self, mock_post):
         """Test stats retrieval for DHCP4"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp4": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": [{"id": 1}]}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": [{"id": 1}]}}}]
 
         stats_response = Mock()
         stats_response.json.return_value = [
-            {"arguments": {"pkt4-received": [[100, "2024-01-01"]], "pkt4-ack-sent": [[50, "2024-01-01"]]}}
+            {"result": 0, "arguments": {"pkt4-received": [[100, "2024-01-01"]], "pkt4-ack-sent": [[50, "2024-01-01"]]}}
         ]
 
         mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
@@ -363,13 +366,13 @@ class TestKeaHTTPClientStats(unittest.TestCase):
     def test_stats_dhcp6(self, mock_post):
         """Test stats retrieval for DHCP6"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp6": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp6": {}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp6": {"subnet6": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp6": {"subnet6": []}}}]
 
         stats_response = Mock()
-        stats_response.json.return_value = [{"arguments": {"pkt6-received": [[200, "2024-01-01"]]}}]
+        stats_response.json.return_value = [{"result": 0, "arguments": {"pkt6-received": [[200, "2024-01-01"]]}}]
 
         mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
 
@@ -385,11 +388,11 @@ class TestKeaHTTPClientStats(unittest.TestCase):
     def test_stats_ddns(self, mock_post):
         """Test stats retrieval for DDNS"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"ddns": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"ddns": {}}}]
 
         stats_response = Mock()
         stats_response.json.return_value = [
-            {"arguments": {"ncr-received": [[150, "2024-01-01"]], "update-sent": [[100, "2024-01-01"]]}}
+            {"result": 0, "arguments": {"ncr-received": [[150, "2024-01-01"]], "update-sent": [[100, "2024-01-01"]]}}
         ]
 
         mock_post.side_effect = [config_response, stats_response]
@@ -407,15 +410,15 @@ class TestKeaHTTPClientStats(unittest.TestCase):
     def test_stats_multiple_modules(self, mock_post):
         """Test stats retrieval for multiple modules"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp4": {}, "ddns": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}, "ddns": {}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
         stats_response = Mock()
         stats_response.json.return_value = [
-            {"arguments": {"pkt4-received": [[100, "2024-01-01"]]}},
-            {"arguments": {"ncr-received": [[50, "2024-01-01"]]}},
+            {"result": 0, "arguments": {"pkt4-received": [[100, "2024-01-01"]]}},
+            {"result": 0, "arguments": {"ncr-received": [[50, "2024-01-01"]]}},
         ]
 
         mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
@@ -434,13 +437,13 @@ class TestKeaHTTPClientStats(unittest.TestCase):
     def test_stats_server_id_without_credentials(self, mock_post):
         """Test that server_id doesn't include credentials"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp4": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
         stats_response = Mock()
-        stats_response.json.return_value = [{"arguments": {}}]
+        stats_response.json.return_value = [{"result": 0, "arguments": {}}]
 
         mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
 
@@ -458,13 +461,13 @@ class TestKeaHTTPClientStats(unittest.TestCase):
     def test_stats_uses_timeout(self, mock_post):
         """Test that stats uses configured timeout"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp4": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
         stats_response = Mock()
-        stats_response.json.return_value = [{"arguments": {}}]
+        stats_response.json.return_value = [{"result": 0, "arguments": {}}]
 
         mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
 
@@ -494,16 +497,16 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
     def test_stats_raises_on_http_error(self, mock_post):
         """Test that stats raises on non-2xx HTTP response"""
         config_response = Mock()
-        config_response.json.return_value = [{"arguments": {"dhcp4": {}}}]
+        config_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
         config_response.raise_for_status.return_value = None
 
         subnets_response = Mock()
-        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
         subnets_response.raise_for_status.return_value = None
 
         # subnets reload succeeds, but stats call fails
         subnets_reload = Mock()
-        subnets_reload.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_reload.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
         subnets_reload.raise_for_status.return_value = None
 
         stats_response = Mock()
@@ -524,7 +527,7 @@ class TestURLParsing(unittest.TestCase):
     def test_url_with_special_chars_in_password(self, mock_post):
         """Test URL with special characters in password"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         # Password contains special chars that need URL encoding
@@ -537,7 +540,7 @@ class TestURLParsing(unittest.TestCase):
     def test_url_with_query_params(self, mock_post):
         """Test URL with query parameters"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(
@@ -551,7 +554,7 @@ class TestURLParsing(unittest.TestCase):
     def test_https_url(self, mock_post):
         """Test HTTPS URL handling"""
         mock_response = Mock()
-        mock_response.json.return_value = [{"arguments": {}}]
+        mock_response.json.return_value = [{"result": 0, "arguments": {}}]
         mock_post.return_value = mock_response
 
         client = KeaHTTPClient(target="https://user:pass@secure.example.com:8443", client_cert=None, client_key=None)
