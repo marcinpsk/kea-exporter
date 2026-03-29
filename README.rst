@@ -120,8 +120,10 @@ The following features are not supported yet, help is welcome.
 Usage
 -----
 
-Pass one or multiple HTTP Control-Agent URLs (or Unix Domain Socket paths)
-to the ``kea-exporter`` executable. All other options are optional.
+Pass one or multiple Kea HTTP API endpoints — either a Control-Agent URL or a
+direct DHCP daemon HTTP endpoint (Control Agent is optional for Kea 2.7.2+) —
+or Unix Domain Socket paths to the ``kea-exporter`` executable. All other
+options are optional.
 
 ::
 
@@ -144,7 +146,7 @@ You can also configure the exporter using environment variables:
 
    export ADDRESS="0.0.0.0"
    export PORT="9547"
-   export INTERVAL="7.5"
+   export INTERVAL="7"
    export TIMEOUT="30"
    export TARGETS="http://router.example.com:8000"
    export CLIENT_CERT="/etc/kea-exporter/client.crt"

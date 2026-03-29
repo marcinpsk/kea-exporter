@@ -100,6 +100,15 @@ class KeaHTTPClient:
         )
         r.raise_for_status()
         config = r.json()
+
+        # Check Kea-level command result before accessing payload
+        if not config or not isinstance(config[0], dict) or config[0].get("result", 0) != 0:
+            if config and isinstance(config[0], dict):
+                error_text = config[0].get("text", "unknown error")
+            else:
+                error_text = str(config)
+            raise ValueError(f"Kea config-get failed: {error_text}")
+
         config_args = config[0].get("arguments", {})
 
         # Try Control Agent discovery first (legacy)
@@ -163,6 +172,9 @@ class KeaHTTPClient:
         for module in config:
             # Skip non-dict responses (e.g., error strings)
             if not isinstance(module, dict):
+                continue
+            # Skip Kea-level error responses
+            if module.get("result", 0) != 0:
                 continue
             dhcp4_config = module.get("arguments", {}).get("Dhcp4", {})
             for subnet in dhcp4_config.get("subnet4", []):
@@ -246,6 +258,10 @@ class KeaHTTPClient:
             else:
                 continue
 
-            arguments = response[index].get("arguments", {})
+            entry = response[index]
+            # Skip Kea-level error responses
+            if not isinstance(entry, dict) or entry.get("result", 0) != 0:
+                continue
+            arguments = entry.get("arguments", {})
 
             yield self._server_id, dhcp_version, arguments, subnets

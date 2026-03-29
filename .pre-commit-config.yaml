@@ -15,10 +15,7 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  - repo: local
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.1
     hooks:
-      - id: git-secrets
-        name: git-secrets
-        entry: git secrets --scan
-        language: system
-        types: [text]
+      - id: gitleaks
