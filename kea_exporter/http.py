@@ -139,8 +139,14 @@ class KeaHTTPClient:
                     else:
                         self.modules.append(service)
 
-    def load_subnets(self):  # noqa: C901
-        # Only load subnets for DHCP services (DDNS doesn't have subnets)
+    @staticmethod
+    def _collect_subnets(dhcp_config, subnet_key):
+        """Yield all subnets from top-level and shared-networks in a DHCP config section."""
+        yield from dhcp_config.get(subnet_key, [])
+        for network in dhcp_config.get("shared-networks", []):
+            yield from network.get(subnet_key, [])
+
+    def load_subnets(self):
         """
         Load IPv4 and IPv6 subnet definitions for configured DHCP modules
         into the instance maps.
@@ -172,34 +178,20 @@ class KeaHTTPClient:
         dhcp4_seen = False
         dhcp6_seen = False
         for module in config:
-            # Skip non-dict responses (e.g., error strings)
             if not isinstance(module, dict):
                 continue
-            # Require explicit "result" key — malformed entries raise ValueError
             if "result" not in module:
                 raise ValueError(f"Kea config-get returned malformed subnet entry: {module!r}")
-            # Skip Kea-level error responses
             if module["result"] != 0:
                 continue
             args = module.get("arguments", {})
 
-            dhcp4_config = args.get("Dhcp4", {})
             if "Dhcp4" in args:
                 dhcp4_seen = True
-            for subnet in dhcp4_config.get("subnet4", []):
-                new_subnets[subnet["id"]] = subnet
-            for network in dhcp4_config.get("shared-networks", []):
-                for subnet in network.get("subnet4", []):
-                    new_subnets[subnet["id"]] = subnet
-
-            dhcp6_config = args.get("Dhcp6", {})
+                new_subnets.update({s["id"]: s for s in self._collect_subnets(args["Dhcp4"], "subnet4")})
             if "Dhcp6" in args:
                 dhcp6_seen = True
-            for subnet in dhcp6_config.get("subnet6", []):
-                new_subnets6[subnet["id"]] = subnet
-            for network in dhcp6_config.get("shared-networks", []):
-                for subnet in network.get("subnet6", []):
-                    new_subnets6[subnet["id"]] = subnet
+                new_subnets6.update({s["id"]: s for s in self._collect_subnets(args["Dhcp6"], "subnet6")})
 
         if dhcp4_seen:
             self.subnets = new_subnets
