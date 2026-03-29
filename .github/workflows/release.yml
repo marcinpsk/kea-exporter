@@ -72,3 +72,14 @@ jobs:
     permissions:
       id-token: write
       contents: read
+
+  docker:
+    name: Publish Docker images
+    needs: semantic-release
+    if: needs.semantic-release.outputs.released == 'true'
+    uses: ./.github/workflows/docker.yml
+    with:
+      tag: ${{ needs.semantic-release.outputs.tag }}
+    permissions:
+      contents: read
+      packages: write
