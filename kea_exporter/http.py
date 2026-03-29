@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
 
@@ -224,8 +225,6 @@ class KeaHTTPClient:
         try:
             self.load_subnets()
         except Exception as e:
-            import sys
-
             print(
                 f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(e).__name__}: {e}",
                 file=sys.stderr,
