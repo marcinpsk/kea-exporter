@@ -5,6 +5,8 @@ name: Release
     branches:
       - staging
 
+permissions: {}
+
 jobs:
   semantic-release:
     name: Semantic Release

@@ -562,6 +562,30 @@ class TestExporterUpdate(unittest.TestCase):
             self.assertEqual(call_args[0], "http://server:8000")  # server_id
             self.assertEqual(call_args[1], DHCPVersion.DHCP4)  # dhcp_version
 
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_update_continues_on_target_failure(self, mock_echo, mock_http):
+        """Test that a failing target does not prevent other targets from being collected"""
+        mock_client1 = Mock()
+        mock_client1.stats.side_effect = ConnectionError("server1 down")
+        mock_client1._server_id = "http://server1:8000"
+
+        mock_client2 = Mock()
+        mock_client2.stats.return_value = [("http://server2:8000", DHCPVersion.DHCP4, {}, {})]
+
+        mock_http.side_effect = [mock_client1, mock_client2]
+
+        exporter = Exporter(targets=["http://server1:8000", "http://server2:8000"], registry=self.registry)
+        exporter.update()
+
+        # First target failed but second should still have been called
+        mock_client1.stats.assert_called_once()
+        mock_client2.stats.assert_called_once()
+        # Error should have been logged
+        mock_echo.assert_called()
+        error_msg = mock_echo.call_args[0][0]
+        self.assertIn("server1", error_msg)
+
 
 class TestExporterSubnetPattern(unittest.TestCase):
     """Test subnet pattern regex"""

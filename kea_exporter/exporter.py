@@ -99,8 +99,11 @@ class Exporter:
         metric gauges reflect the latest values.
         """
         for target in self.targets:
-            for response in target.stats():
-                self.parse_metrics(*response)
+            try:
+                for response in target.stats():
+                    self.parse_metrics(*response)
+            except Exception as ex:
+                click.echo(f"Failed to collect metrics from {getattr(target, '_server_id', target)}: {ex}", err=True)
 
     def setup_dhcp4_metrics(self):
         """

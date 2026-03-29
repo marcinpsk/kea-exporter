@@ -3,6 +3,8 @@ on:
   push:
     tags: ["*"]
 
+permissions: {}
+
 jobs:
   pypi-publish:
     if: github.repository == 'mweinelt/kea-exporter'
@@ -10,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v6

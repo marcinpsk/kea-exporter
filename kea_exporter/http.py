@@ -91,6 +91,7 @@ class KeaHTTPClient:
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
+        r.raise_for_status()
         config = r.json()
         config_args = config[0].get("arguments", {})
 
@@ -146,6 +147,7 @@ class KeaHTTPClient:
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
+        r.raise_for_status()
         config = r.json()
         for module in config:
             # Skip non-dict responses (e.g., error strings)
@@ -194,6 +196,7 @@ class KeaHTTPClient:
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
+        r.raise_for_status()
         response = r.json()
 
         for index, module in enumerate(self.modules):

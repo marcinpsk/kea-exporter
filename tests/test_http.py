@@ -5,6 +5,8 @@ Tests for kea_exporter.http module
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from kea_exporter import DHCPVersion
 from kea_exporter.http import KeaHTTPClient
 
@@ -473,6 +475,46 @@ class TestKeaHTTPClientStats(unittest.TestCase):
         # Check stats call used timeout
         stats_call = mock_post.call_args_list[-1]
         self.assertEqual(stats_call[1]["timeout"], 20)
+
+
+class TestKeaHTTPClientErrorHandling(unittest.TestCase):
+    """Test HTTP error handling"""
+
+    @patch("kea_exporter.http.requests.post")
+    def test_load_modules_raises_on_http_error(self, mock_post):
+        """Test that load_modules raises on non-2xx HTTP response"""
+        error_response = Mock()
+        error_response.raise_for_status.side_effect = requests.HTTPError("500 Server Error")
+        mock_post.return_value = error_response
+
+        with self.assertRaises(requests.HTTPError):
+            KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+
+    @patch("kea_exporter.http.requests.post")
+    def test_stats_raises_on_http_error(self, mock_post):
+        """Test that stats raises on non-2xx HTTP response"""
+        config_response = Mock()
+        config_response.json.return_value = [{"arguments": {"dhcp4": {}}}]
+        config_response.raise_for_status.return_value = None
+
+        subnets_response = Mock()
+        subnets_response.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_response.raise_for_status.return_value = None
+
+        # subnets reload succeeds, but stats call fails
+        subnets_reload = Mock()
+        subnets_reload.json.return_value = [{"arguments": {"Dhcp4": {"subnet4": []}}}]
+        subnets_reload.raise_for_status.return_value = None
+
+        stats_response = Mock()
+        stats_response.raise_for_status.side_effect = requests.HTTPError("503 Service Unavailable")
+
+        mock_post.side_effect = [config_response, subnets_response, subnets_reload, stats_response]
+
+        client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+
+        with self.assertRaises(requests.HTTPError):
+            list(client.stats())
 
 
 class TestURLParsing(unittest.TestCase):

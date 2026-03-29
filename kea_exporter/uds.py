@@ -53,12 +53,13 @@ class KeaSocketClient:
 
     def query(self, command):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(10)
             sock.connect(self.sock_path)
             sock.send(bytes(json.dumps({"command": command}), "utf-8"))
             response = json.loads(sock.makefile().read(-1))
 
         if response["result"] != 0:
-            raise ValueError
+            raise ValueError(response.get("text", f"Query '{command}' failed with result {response['result']}"))
 
         return response
 
