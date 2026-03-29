@@ -65,11 +65,8 @@ class Exporter:
         # track unhandled metric keys, to notify only once
         self.unhandled_metrics = set()
 
-        # track missing info, to notify only once
-        self.subnet_missing_info_sent = {
-            DHCPVersion.DHCP4: set(),
-            DHCPVersion.DHCP6: set(),
-        }
+        # track missing info per (server_id, dhcp_version), to notify only once
+        self.subnet_missing_info_sent = {}
 
         self.targets = []
         for target in targets:
@@ -95,6 +92,10 @@ class Exporter:
                         safe_host = f"{safe_host}:{parsed.port}"
                     safe_target = f"{parsed.scheme}://{safe_host}{parsed.path}"
                 click.echo(f"Failed to initialize target {safe_target}: {type(ex).__name__}: {ex}")
+                # Keep placeholder so update() can retry initialization
+                self.targets.append(
+                    {"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs}
+                )
                 continue
 
             self.targets.append(client)
@@ -106,9 +107,31 @@ class Exporter:
 
         Iterates each configured client, retrieves that client's reported
         metric responses, and processes each response so the exporter's
-        metric gauges reflect the latest values.
+        metric gauges reflect the latest values. Uninitialized targets
+        (from failed client creation) are retried each update cycle.
         """
-        for target in self.targets:
+        for i, target in enumerate(self.targets):
+            # Retry uninitialized targets
+            if isinstance(target, dict) and target.get("client") is None:
+                raw = target["target"]
+                url = urlparse(raw)
+                try:
+                    if url.scheme:
+                        client = KeaHTTPClient(raw, **target["kwargs"])
+                    elif url.path:
+                        client = KeaSocketClient(raw, **target["kwargs"])
+                    else:
+                        continue
+                    self.targets[i] = client
+                    target = client
+                    click.echo(
+                        f"Successfully initialized previously failed target: "
+                        f"{getattr(client, '_server_id', raw)}"
+                    )
+                except Exception as ex:
+                    target["last_error"] = str(ex)
+                    continue
+
             try:
                 for response in target.stats():
                     self.parse_metrics(*response)
@@ -615,7 +638,7 @@ class Exporter:
         # Pattern to match per-key metrics: key[domain.name.].metric-name
         self.ddns_key_pattern = re.compile(r"^key\[(?P<key>[^\]]+)\]\.(?P<metric>.+)$")
 
-    def _resolve_subnet_labels(self, key, subnet_match, dhcp_version, subnets, subnet_ignore, labels):
+    def _resolve_subnet_labels(self, key, subnet_match, server_id, dhcp_version, subnets, subnet_ignore, labels):
         """Resolve subnet/pool context from a subnet pattern match.
 
         Returns (resolved_key, labels) on success, or None to skip this metric.
@@ -630,7 +653,8 @@ class Exporter:
 
         subnet_data = subnets.get(subnet_id, [])
         if not subnet_data:
-            missing_info = self.subnet_missing_info_sent.get(dhcp_version, set())
+            cache_key = (server_id, dhcp_version)
+            missing_info = self.subnet_missing_info_sent.setdefault(cache_key, set())
             if subnet_id not in missing_info:
                 missing_info.add(subnet_id)
                 click.echo(
@@ -647,7 +671,8 @@ class Exporter:
             subnet_pools = [pool.get("pool") for pool in subnet_data.get("pools", [])]
 
             if len(subnet_pools) <= pool_index:
-                missing_info = self.subnet_missing_info_sent.get(dhcp_version, set())
+                cache_key = (server_id, dhcp_version)
+                missing_info = self.subnet_missing_info_sent.setdefault(cache_key, set())
                 missing_key = f"{subnet_id}-{pool_index}"
                 if missing_key not in missing_info:
                     missing_info.add(missing_key)
@@ -728,7 +753,9 @@ class Exporter:
 
             subnet_match = self.subnet_pattern.match(key)
             if subnet_match:
-                result = self._resolve_subnet_labels(key, subnet_match, dhcp_version, subnets, subnet_ignore, labels)
+                result = self._resolve_subnet_labels(
+                    key, subnet_match, server, dhcp_version, subnets, subnet_ignore, labels
+                )
                 if result is None:
                     continue
                 key, labels = result

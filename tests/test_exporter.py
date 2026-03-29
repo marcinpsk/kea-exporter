@@ -102,7 +102,10 @@ class TestExporterInit(unittest.TestCase):
 
         # Should have echoed error but not crashed
         mock_echo.assert_called()
-        self.assertEqual(len(exporter.targets), 0)
+        # Failed targets are kept as placeholder dicts for retry
+        self.assertEqual(len(exporter.targets), 1)
+        self.assertIsInstance(exporter.targets[0], dict)
+        self.assertIsNone(exporter.targets[0]["client"])
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
     @patch("click.echo")
@@ -112,7 +115,9 @@ class TestExporterInit(unittest.TestCase):
 
         exporter = Exporter(targets=["http://admin:s3cret@kea.local:8000/api"], registry=self.registry)
 
-        self.assertEqual(len(exporter.targets), 0)
+        # Failed targets are kept as placeholder dicts for retry
+        self.assertEqual(len(exporter.targets), 1)
+        self.assertIsInstance(exporter.targets[0], dict)
         error_msg = mock_echo.call_args[0][0]
         self.assertNotIn("admin", error_msg)
         self.assertNotIn("s3cret", error_msg)

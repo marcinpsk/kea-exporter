@@ -132,9 +132,10 @@ class KeaHTTPClient:
         into the instance maps.
 
         Fetches configuration for any DHCP modules present in self.modules
-        (only "dhcp4" and "dhcp6" are considered) and updates self.subnets
+        (only "dhcp4" and "dhcp6" are considered) and replaces self.subnets
         with IPv4 subnet entries keyed by their `id` and self.subnets6 with
-        IPv6 subnet entries keyed by their `id`. If no DHCP modules are
+        IPv6 subnet entries keyed by their `id`. Includes subnets from both
+        top-level configuration and shared-networks. If no DHCP modules are
         configured, the method returns without modifying state.
         """
         dhcp_modules = [m for m in self.modules if m in ["dhcp4", "dhcp6"]]
@@ -151,14 +152,29 @@ class KeaHTTPClient:
         )
         r.raise_for_status()
         config = r.json()
+
+        new_subnets = {}
+        new_subnets6 = {}
         for module in config:
             # Skip non-dict responses (e.g., error strings)
             if not isinstance(module, dict):
                 continue
-            for subnet in module.get("arguments", {}).get("Dhcp4", {}).get("subnet4", []):
-                self.subnets.update({subnet["id"]: subnet})
-            for subnet in module.get("arguments", {}).get("Dhcp6", {}).get("subnet6", []):
-                self.subnets6.update({subnet["id"]: subnet})
+            dhcp4_config = module.get("arguments", {}).get("Dhcp4", {})
+            for subnet in dhcp4_config.get("subnet4", []):
+                new_subnets[subnet["id"]] = subnet
+            for network in dhcp4_config.get("shared-networks", []):
+                for subnet in network.get("subnet4", []):
+                    new_subnets[subnet["id"]] = subnet
+
+            dhcp6_config = module.get("arguments", {}).get("Dhcp6", {})
+            for subnet in dhcp6_config.get("subnet6", []):
+                new_subnets6[subnet["id"]] = subnet
+            for network in dhcp6_config.get("shared-networks", []):
+                for subnet in network.get("subnet6", []):
+                    new_subnets6[subnet["id"]] = subnet
+
+        self.subnets = new_subnets
+        self.subnets6 = new_subnets6
 
     def stats(self):
         # Reload subnets on update in case of configurational update

@@ -44,6 +44,7 @@ class KeaSocketClient:
         self.sock_path = os.path.abspath(sock_path)
         # Use socket path as server identifier
         self._server_id = self.sock_path
+        self.timeout = kwargs.get("timeout", 10)
 
         self.version = None
         self.config = None
@@ -53,7 +54,7 @@ class KeaSocketClient:
 
     def query(self, command):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(10)
+            sock.settimeout(self.timeout)
             sock.connect(self.sock_path)
             sock.send(bytes(json.dumps({"command": command}), "utf-8"))
             response = json.loads(sock.makefile().read(-1))
@@ -103,11 +104,17 @@ class KeaSocketClient:
 
         if "Dhcp4" in self.config:
             self.dhcp_version = DHCPVersion.DHCP4
-            subnets = self.config["Dhcp4"]["subnet4"]
+            subnets = self.config["Dhcp4"].get("subnet4", [])
             self.subnets = {subnet["id"]: subnet for subnet in subnets}
+            for network in self.config["Dhcp4"].get("shared-networks", []):
+                for subnet in network.get("subnet4", []):
+                    self.subnets[subnet["id"]] = subnet
         elif "Dhcp6" in self.config:
             self.dhcp_version = DHCPVersion.DHCP6
-            subnets = self.config["Dhcp6"]["subnet6"]
+            subnets = self.config["Dhcp6"].get("subnet6", [])
             self.subnets = {subnet["id"]: subnet for subnet in subnets}
+            for network in self.config["Dhcp6"].get("shared-networks", []):
+                for subnet in network.get("subnet6", []):
+                    self.subnets[subnet["id"]] = subnet
         else:
             raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")
