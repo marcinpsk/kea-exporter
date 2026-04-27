@@ -9,15 +9,6 @@ updates:
         patterns:
           - "*"
 
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    groups:
-      python-dependencies:
-        patterns:
-          - "*"
-
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -34,6 +25,8 @@ updates:
       day: "tuesday"
     commit-message:
       prefix: "chore(deps)"
+    allow:
+      - dependency-type: "all"   # includes indirect / transitive
     groups:
       python-deps:
         patterns:
