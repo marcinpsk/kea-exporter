@@ -1,11 +1,4 @@
-for file in flake.nix flake.lock pyproject.toml uv.lock;
-do
-	watch_file "$file"
-done
-
-if has nix; then
-    use_flake
-fi
+watch_file pyproject.toml uv.lock
 
 if has uv; then
     if [ -d "$PWD/.venv" ]; then
