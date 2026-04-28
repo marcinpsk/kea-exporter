@@ -7,24 +7,33 @@ name: Release
     branches:
       - main
 
+# Default: least-privileged permissions across all jobs
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   semantic-release:
     name: Semantic Release
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
     outputs:
       released: ${{ steps.release.outputs.released }}
       tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
           fetch-tags: true
           token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Force release branch to workflow SHA
+        run: git reset --hard ${{ github.sha }}
 
       - name: Debug git state
         if: github.event_name == 'workflow_dispatch'
