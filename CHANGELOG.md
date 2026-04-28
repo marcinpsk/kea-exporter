@@ -1,5 +1,35 @@
 
 
+0.8.0
+
+
+
+ - semver build fix
+
+ - materialise target.stats() before mutating gauges
+
+ - retry limit, narrow gauge.remove exception, SIGINT before shutdown
+
+ - use recv() loop in UDS query() to respect socket timeout
+
+ - track (server_id, dhcp_version) pairs in stale-label pruning
+
+ - address CodeRabbit review findings on stale-label timeout
+
+
+
+
+
+ - add --no-tls-verify and --ca-bundle options for TLS verification
+
+ - implement configurable stale-label timeout
+
+
+
+
+
+
+
 0.7.9
 
 
