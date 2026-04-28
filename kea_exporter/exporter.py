@@ -190,8 +190,12 @@ class Exporter:
                     continue
 
             try:
+                # Materialise the generator before mutating any gauges so that a
+                # mid-stream exception cannot leave a partial snapshot in the registry
+                # or seed _seen_labels_current with incomplete label tuples.
+                stats_rows = list(target.stats())
                 completed_server_versions: set[tuple[str, DHCPVersion]] = set()
-                for server_id, dhcp_version, arguments, subnets in target.stats():
+                for server_id, dhcp_version, arguments, subnets in stats_rows:
                     self.parse_metrics(server_id, dhcp_version, arguments, subnets)
                     completed_server_versions.add((server_id, dhcp_version))
                 scrape_finished_at = time.monotonic()
