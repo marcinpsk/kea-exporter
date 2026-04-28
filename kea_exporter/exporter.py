@@ -557,10 +557,11 @@ class Exporter:
                 ["server", "subnet", "subnet_id", "pool"],
                 registry=self.registry,
             ),
+            # v6-ia-na-lease-reuses is subnet-level only in Kea (no pool-level variant)
             "na_reuses_total": Gauge(
                 f"{self.prefix_dhcp6}_na_reuses_total",
                 "Number of IA_NA lease reuses",
-                ["server", "subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id"],
                 registry=self.registry,
             ),
             # IA_PD
@@ -576,10 +577,11 @@ class Exporter:
                 ["server", "subnet", "subnet_id"],
                 registry=self.registry,
             ),
+            # v6-ia-pd-lease-reuses is subnet-level only in Kea (no pool-level variant)
             "pd_reuses_total": Gauge(
                 f"{self.prefix_dhcp6}_pd_reuses_total",
                 "Number of IA_PD lease reuses",
-                ["server", "subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id"],
                 registry=self.registry,
             ),
             # Address Registration (Kea 2.5.5+): registered-nas is subnet-level only

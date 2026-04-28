@@ -282,6 +282,19 @@ class TestExporterServerLabeling(unittest.TestCase):
         self.assertIn("subnet", na_assigned._labelnames)
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_dhcp6_reuse_gauges_no_pool_label(self, mock_http):
+        """na_reuses_total and pd_reuses_total have no pool label (subnet-level only in Kea)"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        for key in ("na_reuses_total", "pd_reuses_total"):
+            gauge = exporter.metrics_dhcp6[key]
+            self.assertIn("server", gauge._labelnames, key)
+            self.assertIn("subnet", gauge._labelnames, key)
+            self.assertIn("subnet_id", gauge._labelnames, key)
+            self.assertNotIn("pool", gauge._labelnames, key)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
     def test_dhcp6_addr_reg_gauge_registered(self, mock_http):
         """na_registered_total gauge exists with correct labels (Kea 2.5.5+)"""
         mock_http.return_value = Mock()
@@ -449,6 +462,36 @@ class TestExporterParseMetrics(unittest.TestCase):
         # Should not add anything to unhandled_metrics
         exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
         self.assertNotIn("cumulative-registered-nas", exporter.unhandled_metrics)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_dhcp6_lease_reuses_subnet(self, mock_http):
+        """v6-ia-na/pd-lease-reuses are subnet-level only — no pool label emitted."""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        subnet_id = 7
+        subnets = {subnet_id: {"subnet": "2001:db8::/48", "pools": [{"pool": "2001:db8::1-2001:db8::ff"}]}}
+        arguments = {
+            f"subnet[{subnet_id}].v6-ia-na-lease-reuses": [[3, "2024-01-01 00:00:00"]],
+            f"subnet[{subnet_id}].v6-ia-pd-lease-reuses": [[5, "2024-01-01 00:00:00"]],
+        }
+
+        mock_na = Mock()
+        mock_na._labelnames = ["server", "subnet", "subnet_id"]
+        mock_na.labels = Mock(return_value=mock_na)
+        mock_pd = Mock()
+        mock_pd._labelnames = ["server", "subnet", "subnet_id"]
+        mock_pd.labels = Mock(return_value=mock_pd)
+        exporter.metrics_dhcp6["na_reuses_total"] = mock_na
+        exporter.metrics_dhcp6["pd_reuses_total"] = mock_pd
+
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
+
+        mock_na.labels.assert_called_once_with(server=server_id, subnet="2001:db8::/48", subnet_id=subnet_id)
+        mock_na.set.assert_called_once_with(3)
+        mock_pd.labels.assert_called_once_with(server=server_id, subnet="2001:db8::/48", subnet_id=subnet_id)
+        mock_pd.set.assert_called_once_with(5)
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
     def test_parse_metrics_ddns(self, mock_http):
