@@ -281,6 +281,18 @@ class TestExporterServerLabeling(unittest.TestCase):
         self.assertIn("server", na_assigned._labelnames)
         self.assertIn("subnet", na_assigned._labelnames)
 
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_dhcp6_addr_reg_gauge_registered(self, mock_http):
+        """na_registered_total gauge exists with correct labels (Kea 2.5.5+)"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        na_registered = exporter.metrics_dhcp6["na_registered_total"]
+        self.assertIn("server", na_registered._labelnames)
+        self.assertIn("subnet", na_registered._labelnames)
+        self.assertIn("subnet_id", na_registered._labelnames)
+        self.assertIn("pool", na_registered._labelnames)
+
 
 class TestExporterParseMetrics(unittest.TestCase):
     """Test parse_metrics method"""
@@ -359,6 +371,80 @@ class TestExporterParseMetrics(unittest.TestCase):
         # Verify sent_packets was called with correct labels and value
         mock_sent_labels.assert_called_once_with(server=server_id, operation="reply")
         mock_sent.set.assert_called_once_with(150)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_dhcp6_addr_reg_packets(self, mock_http):
+        """Test parsing DHCPv6 address registration packet metrics (Kea 2.5.5+)"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        arguments = {
+            "pkt6-addr-reg-inform-received": [[10, "2024-01-01 00:00:00"]],
+            "pkt6-addr-reg-reply-received": [[8, "2024-01-01 00:00:00"]],
+            "pkt6-addr-reg-reply-sent": [[9, "2024-01-01 00:00:00"]],
+        }
+        subnets = {}
+
+        mock_received = Mock()
+        mock_received._labelnames = ["server", "operation"]
+        mock_received.labels = Mock(return_value=mock_received)
+        exporter.metrics_dhcp6["received_packets"] = mock_received
+
+        mock_sent = Mock()
+        mock_sent._labelnames = ["server", "operation"]
+        mock_sent.labels = Mock(return_value=mock_sent)
+        exporter.metrics_dhcp6["sent_packets"] = mock_sent
+
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
+
+        mock_received.labels.assert_any_call(server=server_id, operation="addr-reg-inform")
+        mock_received.labels.assert_any_call(server=server_id, operation="addr-reg-reply")
+        mock_sent.labels.assert_called_once_with(server=server_id, operation="addr-reg-reply")
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_dhcp6_registered_nas_subnet(self, mock_http):
+        """Test parsing DHCPv6 registered-nas at subnet level (Kea 2.5.5+)"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        subnet_id = 5
+        subnets = {subnet_id: {"subnet": "2001:db8::/48", "pools": [{"pool": "2001:db8::1-2001:db8::ff"}]}}
+        arguments = {f"subnet[{subnet_id}].pool[0].registered-nas": [[7, "2024-01-01 00:00:00"]]}
+
+        mock_gauge = Mock()
+        mock_gauge._labelnames = ["server", "subnet", "subnet_id", "pool"]
+        mock_gauge.labels = Mock(return_value=mock_gauge)
+        exporter.metrics_dhcp6["na_registered_total"] = mock_gauge
+
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
+
+        mock_gauge.labels.assert_called_once_with(
+            server=server_id,
+            subnet="2001:db8::/48",
+            subnet_id=subnet_id,
+            pool="2001:db8::1-2001:db8::ff",
+        )
+        mock_gauge.set.assert_called_once_with(7)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_parse_metrics_dhcp6_cumulative_registered_nas_ignored(self, mock_http):
+        """cumulative-registered-nas at global and subnet level should be silently ignored"""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+        server_id = "http://localhost:8000"
+        subnet_id = 5
+        subnets = {subnet_id: {"subnet": "2001:db8::/48", "pools": []}}
+        arguments = {
+            "cumulative-registered-nas": [[100, "2024-01-01 00:00:00"]],
+            f"subnet[{subnet_id}].cumulative-registered-nas": [[50, "2024-01-01 00:00:00"]],
+        }
+
+        # Should not add anything to unhandled_metrics
+        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
+        self.assertNotIn("cumulative-registered-nas", exporter.unhandled_metrics)
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
     def test_parse_metrics_ddns(self, mock_http):

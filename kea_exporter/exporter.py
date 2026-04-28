@@ -582,12 +582,21 @@ class Exporter:
                 ["server", "subnet", "subnet_id", "pool"],
                 registry=self.registry,
             ),
+            # Address Registration (Kea 2.5.5+)
+            "na_registered_total": Gauge(
+                f"{self.prefix_dhcp6}_na_registered_total",
+                "Registered non-temporary addresses via DHCPv6 address registration",
+                ["server", "subnet", "subnet_id", "pool"],
+                registry=self.registry,
+            ),
         }
 
         self.metrics_dhcp6_map = {
             # sent_packets
             "pkt6-advertise-sent": {"metric": "sent_packets", "labels": {"operation": "advertise"}},
             "pkt6-reply-sent": {"metric": "sent_packets", "labels": {"operation": "reply"}},
+            # Address Registration sent (Kea 2.5.5+)
+            "pkt6-addr-reg-reply-sent": {"metric": "sent_packets", "labels": {"operation": "addr-reg-reply"}},
             # received_packets
             "pkt6-receive-drop": {"metric": "received_packets", "labels": {"operation": "drop"}},
             "pkt6-parse-failed": {"metric": "received_packets", "labels": {"operation": "parse-failed"}},
@@ -601,6 +610,9 @@ class Exporter:
             "pkt6-decline-received": {"metric": "received_packets", "labels": {"operation": "decline"}},
             "pkt6-infrequest-received": {"metric": "received_packets", "labels": {"operation": "infrequest"}},
             "pkt6-unknown-received": {"metric": "received_packets", "labels": {"operation": "unknown"}},
+            # Address Registration received (Kea 2.5.5+)
+            "pkt6-addr-reg-inform-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-inform"}},
+            "pkt6-addr-reg-reply-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-reply"}},
             # DHCPv4-over-DHCPv6
             "pkt6-dhcpv4-response-sent": {"metric": "sent_dhcp4_packets", "labels": {"operation": "response"}},
             "pkt6-dhcpv4-query-received": {"metric": "received_dhcp4_packets", "labels": {"operation": "query"}},
@@ -624,6 +636,8 @@ class Exporter:
             "v6-reservation-conflicts": {"metric": "reservation_conflicts_total"},
             "v6-ia-na-lease-reuses": {"metric": "na_reuses_total"},
             "v6-ia-pd-lease-reuses": {"metric": "pd_reuses_total"},
+            # Address Registration (Kea 2.5.5+)
+            "registered-nas": {"metric": "na_registered_total"},
         }
 
         # Ignore list for Global level metrics
@@ -634,6 +648,8 @@ class Exporter:
             # sums of different packet types
             "cumulative-assigned-nas",
             "cumulative-assigned-pds",
+            # Address Registration cumulative totals (subnet-level detail is sufficient)
+            "cumulative-registered-nas",
             "reclaimed-declined-addresses",
             "reclaimed-leases",
             "v6-reservation-conflicts",
@@ -652,6 +668,7 @@ class Exporter:
             "cumulative-assigned-addresses",
             "cumulative-assigned-nas",
             "cumulative-assigned-pds",
+            "cumulative-registered-nas",
             "v6-allocation-fail",
         ]
 
