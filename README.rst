@@ -1,4 +1,8 @@
-|license|
+|checks| |license|
+
+.. |checks| image:: https://github.com/marcinpsk/kea-exporter/actions/workflows/checks.yml/badge.svg
+   :alt: Lint & Test
+   :target: https://github.com/marcinpsk/kea-exporter/actions/workflows/checks.yml
 
 .. |license| image:: https://img.shields.io/github/license/marcinpsk/kea-exporter
    :alt: GitHub license
@@ -24,8 +28,10 @@ Key differences from upstream:
 - Support for subnets inside **shared-networks** (not just top-level ``subnet4``/``subnet6``)
 - DDNS metrics support
 - Per-server metric deduplication (multi-target setups)
-- Failed target retry on each scrape cycle
-- Configurable timeout (``--timeout``)
+- Failed target retry on each scrape cycle (up to 10 attempts)
+- Configurable HTTP request timeout (``--timeout``)
+- Configurable stale-label timeout for unreachable servers (``--stale-timeout``)
+- TLS verification control: custom CA bundle (``--ca-bundle``) or disable verification (``--no-tls-verify``)
 
 .. note::
 
@@ -97,9 +103,11 @@ Features
 - Subnets inside shared-networks
 - Configuration and statistics via HTTP/HTTPS API or Unix domain socket
 - Multiple Kea targets with per-server labels
-- Automatic retry of failed targets on each scrape
+- Automatic retry of failed targets on each scrape (up to 10 attempts)
 - Configurable HTTP request timeout
 - Client certificate (mTLS) support
+- Configurable stale-label timeout — auto-remove metrics for unreachable servers (``--stale-timeout``)
+- TLS certificate verification: custom CA bundle (``--ca-bundle``) or disable verification (``--no-tls-verify``)
 
 Testing Status
 //////////////
@@ -130,15 +138,22 @@ options are optional.
 	Usage: kea-exporter [OPTIONS] TARGETS...
 
 	Options:
-	  -a, --address TEXT        Address that the exporter binds to.
-	  -p, --port INTEGER        Port that the exporter binds to.
-	  -i, --interval INTEGER    Minimal interval between two queries to Kea in
-	                            seconds.
-	  --client-cert PATH        Path to client certificate used in HTTP requests
-	  --client-key PATH         Path to client key used in HTTP requests
-	  --timeout INTEGER RANGE   Timeout for HTTP requests in seconds.  [x>=1]
-	  --version                 Show the version and exit.
-	  --help                    Show this message and exit.
+	  -a, --address TEXT             Address that the exporter binds to.
+	  -p, --port INTEGER             Port that the exporter binds to.
+	  -i, --interval INTEGER         Minimal interval between two queries to Kea in
+	                                 seconds.
+	  --client-cert PATH             Path to client certificate used in HTTP requests
+	  --client-key PATH              Path to client key used in HTTP requests
+	  --timeout INTEGER RANGE        Timeout for HTTP requests in seconds.  [x>=1]
+	  --stale-timeout INTEGER RANGE  Remove metrics for a server that has not
+	                                 responded for this many seconds. 0 disables
+	                                 the timeout (default).  [x>=0]
+	  --no-tls-verify                Disable TLS certificate verification for
+	                                 HTTPS targets (insecure).
+	  --ca-bundle PATH               Path to a CA bundle file for TLS certificate
+	                                 verification.
+	  --version                      Show the version and exit.
+	  --help                         Show this message and exit.
 
 You can also configure the exporter using environment variables:
 
@@ -151,6 +166,9 @@ You can also configure the exporter using environment variables:
    export TARGETS="http://router.example.com:8000"
    export CLIENT_CERT="/etc/kea-exporter/client.crt"
    export CLIENT_KEY="/etc/kea-exporter/client.key"
+   export STALE_TIMEOUT="300"
+   export CA_BUNDLE="/etc/ssl/certs/my-ca.pem"
+   # export TLS_NO_VERIFY="1"  # insecure — disables TLS verification
 
 
 Configure Kea HTTP API
@@ -165,10 +183,33 @@ Consult the Kea documentation on how to set up the management API:
 - https://kea.readthedocs.io/en/latest/arm/dhcp4-srv.html#management-api-for-the-dhcpv4-server
 - https://kea.readthedocs.io/en/latest/arm/dhcp6-srv.html#management-api-for-the-dhcpv6-server
 
-HTTPS
+HTTPS / TLS
 ///////////
-If you need to validate a self-signed certificate on a Kea instance, you can set ``REQUESTS_CA_BUNDLE``
-environment variable to a bundle CA path.
+
+TLS certificate verification is enabled by default for all HTTPS targets.
+
+To use a **custom CA certificate bundle** (e.g. for internal PKI or self-signed
+certificates)::
+
+    $ kea-exporter --ca-bundle /path/to/ca-bundle.pem https://kea-server:8443
+    $ export CA_BUNDLE=/path/to/ca-bundle.pem
+
+To **disable TLS verification entirely** (development or testing only — insecure)::
+
+    $ kea-exporter --no-tls-verify https://kea-server:8443
+    $ export TLS_NO_VERIFY=1
+
+Stale-Label Timeout
+///////////////////
+
+By default, metrics for an unreachable server are kept indefinitely until the
+server starts responding again. Use ``--stale-timeout`` to automatically remove
+them after a given number of seconds::
+
+    $ kea-exporter --stale-timeout 300 http://kea-server:8000
+    $ export STALE_TIMEOUT=300
+
+A value of ``0`` (the default) disables the timeout.
 
 Permissions
 ///////////

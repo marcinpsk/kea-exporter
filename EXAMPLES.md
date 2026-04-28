@@ -97,7 +97,72 @@ export TARGETS="https://kea-server:8443"
 kea-exporter
 ```
 
-## Prometheus Configuration
+## TLS / HTTPS Certificate Verification
+
+### Custom CA Bundle (internal PKI or self-signed certificates)
+
+```bash
+# Use a custom CA certificate bundle for verification
+kea-exporter --ca-bundle /path/to/ca-bundle.pem https://kea-server:8443
+
+# Or via environment variable
+export CA_BUNDLE=/path/to/ca-bundle.pem
+kea-exporter https://kea-server:8443
+```
+
+### Disable TLS Verification (development only — insecure)
+
+```bash
+# Skip TLS certificate verification (not recommended for production)
+kea-exporter --no-tls-verify https://kea-server:8443
+
+# Or via environment variable
+export TLS_NO_VERIFY=1
+kea-exporter https://kea-server:8443
+```
+
+> ⚠️ Using `--no-tls-verify` disables all TLS certificate validation. Only use this
+> in isolated development/test environments.
+
+### TLS with Client Certificate (mTLS)
+
+Client certificates and CA bundle can be combined:
+
+```bash
+kea-exporter \
+  --client-cert /etc/ssl/client.crt \
+  --client-key  /etc/ssl/client.key \
+  --ca-bundle   /etc/ssl/internal-ca.pem \
+  https://kea-server:8443
+```
+
+## Stale-Label Timeout
+
+By default, metrics for an unreachable server are kept indefinitely. To
+automatically remove them after the server has been silent for a given period:
+
+```bash
+# Remove stale metrics after 5 minutes of no response
+kea-exporter --stale-timeout 300 http://kea-server:8000
+
+# Or via environment variable
+export STALE_TIMEOUT=300
+kea-exporter http://kea-server:8000
+```
+
+A value of `0` (the default) disables the timeout — stale metrics are never
+pruned automatically.
+
+```bash
+# Combine with multiple targets and other options
+kea-exporter \
+  --stale-timeout 600 \
+  --timeout 15 \
+  http://dhcp-server1:8000 \
+  http://dhcp-server2:8000
+```
+
+
 
 Example Prometheus scrape config:
 
