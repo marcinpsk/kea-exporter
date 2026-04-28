@@ -31,9 +31,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: uv sync --group dev
-
       - name: Debug git state
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -44,7 +41,7 @@ jobs:
           echo "=== Last 12 commits ==="
           git log --oneline -12
           echo "=== semantic-release --print ==="
-          uv run semantic-release version --print || echo "print failed"
+          uvx --from python-semantic-release semantic-release version --print || echo "print failed"
 
       - name: Run semantic-release
         id: release
@@ -53,7 +50,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           BEFORE=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
-          uv run semantic-release -vv version --changelog --push
+          uvx --from python-semantic-release semantic-release -vv version --changelog --push
           AFTER=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
           if [ "$BEFORE" != "$AFTER" ]; then
             echo "released=true" >> $GITHUB_OUTPUT
