@@ -414,6 +414,10 @@ class TestExporterParseMetrics(unittest.TestCase):
         mock_received.labels.assert_any_call(server=server_id, operation="addr-reg-inform")
         mock_received.labels.assert_any_call(server=server_id, operation="addr-reg-reply")
         mock_sent.labels.assert_called_once_with(server=server_id, operation="addr-reg-reply")
+        self.assertEqual(mock_received.set.call_count, 2)
+        mock_received.set.assert_any_call(10)
+        mock_received.set.assert_any_call(8)
+        mock_sent.set.assert_called_once_with(9)
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
     def test_parse_metrics_dhcp6_registered_nas_subnet(self, mock_http):
@@ -459,9 +463,10 @@ class TestExporterParseMetrics(unittest.TestCase):
             f"subnet[{subnet_id}].cumulative-registered-nas": [[50, "2024-01-01 00:00:00"]],
         }
 
-        # Should not add anything to unhandled_metrics
+        # Should not add anything to unhandled_metrics — check both global and subnet forms
         exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
         self.assertNotIn("cumulative-registered-nas", exporter.unhandled_metrics)
+        self.assertNotIn(f"subnet[{subnet_id}].cumulative-registered-nas", exporter.unhandled_metrics)
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
     def test_parse_metrics_dhcp6_lease_reuses_subnet(self, mock_http):
