@@ -148,10 +148,14 @@ class Exporter:
                     continue
 
             try:
+                completed_servers = set()
                 for server_id, dhcp_version, arguments, subnets in target.stats():
                     self.parse_metrics(server_id, dhcp_version, arguments, subnets)
+                    completed_servers.add(server_id)
+                scrape_finished_at = time.monotonic()
+                for server_id in completed_servers:
                     successful_servers.add(server_id)
-                    self._last_success[server_id] = time.monotonic()
+                    self._last_success[server_id] = scrape_finished_at
             except Exception as ex:
                 click.echo(
                     f"Failed to collect metrics from {getattr(target, '_server_id', target)}: "
@@ -163,6 +167,13 @@ class Exporter:
         # present last cycle but absent this cycle.  Only do this for servers
         # that successfully delivered metrics this cycle; transient failures
         # should not cause valid metrics to be pruned.
+        # Seed next_seen_labels from the current cycle; unpruned stale tuples
+        # for silent servers are merged in below so they remain trackable.
+        next_seen_labels: dict = {
+            gauge_id: (gauge, set(current_tuples))
+            for gauge_id, (gauge, current_tuples) in self._seen_labels_current.items()
+        }
+
         for gauge_id, (gauge, prev_tuples) in self._seen_labels_previous.items():
             current_tuples = self._seen_labels_current.get(gauge_id, (None, set()))[1]
             stale = prev_tuples - current_tuples
@@ -184,8 +195,12 @@ class Exporter:
                         gauge.remove(*label_tuple)
                     except Exception:
                         pass
+                else:
+                    # Scrape failed and timeout not yet exceeded — keep the
+                    # tuple in tracking so it can be pruned on a later cycle.
+                    next_seen_labels.setdefault(gauge_id, (gauge, set()))[1].add(label_tuple)
 
-        self._seen_labels_previous = self._seen_labels_current
+        self._seen_labels_previous = next_seen_labels
 
     def setup_dhcp4_metrics(self):
         """

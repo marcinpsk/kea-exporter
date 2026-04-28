@@ -823,7 +823,10 @@ class TestStalePoolCleanup(unittest.TestCase):
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
     def test_stale_label_pruned_after_timeout(self, mock_http):
-        """Labels are pruned when stale_timeout expires after a scrape failure."""
+        """Labels are pruned when stale_timeout expires after a scrape failure.
+
+        Covers the full sequence: success → fail before timeout → fail after timeout.
+        """
         from prometheus_client import generate_latest
 
         server = "http://kea-dhcp4:53100"
@@ -839,6 +842,7 @@ class TestStalePoolCleanup(unittest.TestCase):
         mock_client.stats.side_effect = [
             iter([(server, DHCPVersion.DHCP4, args, subnets)]),
             ConnectionError("target down"),
+            ConnectionError("target down"),
         ]
         mock_http.return_value = mock_client
 
@@ -850,7 +854,14 @@ class TestStalePoolCleanup(unittest.TestCase):
         output = generate_latest(self.registry).decode()
         self.assertIn(pool, output)
 
-        # Advance time past stale_timeout, then scrape fails
+        # Scrape fails before timeout — label must still be present
+        with patch("kea_exporter.exporter.time.monotonic", return_value=30.0):
+            exporter.update()
+
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool, output)
+
+        # Advance time past stale_timeout, then scrape fails — label must be pruned
         with patch("kea_exporter.exporter.time.monotonic", return_value=61.0):
             exporter.update()
 
