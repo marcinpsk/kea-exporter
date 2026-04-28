@@ -16,6 +16,8 @@ class KeaHTTPClient:
         client_cert: str | None = None,
         client_key: str | None = None,
         timeout: int = 10,
+        tls_no_verify: bool = False,
+        ca_bundle: str | None = None,
         **_kwargs: Any,
     ) -> None:
         # kwargs allows passing additional arguments from CLI without breaking
@@ -35,6 +37,10 @@ class KeaHTTPClient:
                 None to disable mutual TLS.
             timeout (int | float): HTTP request timeout in seconds
                 (default 10).
+            tls_no_verify (bool): If True, disable TLS certificate verification
+                (insecure; default False).
+            ca_bundle (str | None): Path to a CA bundle file for TLS
+                verification, or None to use system defaults.
             **kwargs: Intentionally unused; allows Exporter to pass same
                 arguments to both KeaHTTPClient and KeaSocketClient (e.g.,
                 timeout, client_cert) without errors.
@@ -73,6 +79,17 @@ class KeaHTTPClient:
             self._cert = None
 
         self.timeout = timeout
+        if tls_no_verify:
+            if ca_bundle:
+                print(
+                    "Warning: --no-tls-verify takes precedence over --ca-bundle; TLS verification is disabled.",
+                    file=sys.stderr,
+                )
+            self._verify: bool | str = False
+        elif ca_bundle is not None:
+            self._verify = ca_bundle
+        else:
+            self._verify = True
         self.modules = []
         self.subnets = {}
         self.subnets6 = {}
@@ -94,6 +111,7 @@ class KeaHTTPClient:
             self._target,
             cert=self._cert,
             auth=self._auth,
+            verify=self._verify,
             json={"command": "config-get"},
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
@@ -165,6 +183,7 @@ class KeaHTTPClient:
             self._target,
             cert=self._cert,
             auth=self._auth,
+            verify=self._verify,
             json={"command": "config-get", "service": dhcp_modules},
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
@@ -236,6 +255,7 @@ class KeaHTTPClient:
             self._target,
             cert=self._cert,
             auth=self._auth,
+            verify=self._verify,
             json={
                 "command": "statistic-get-all",
                 "arguments": {},

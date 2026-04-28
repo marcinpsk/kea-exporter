@@ -320,6 +320,37 @@ class TestCLIOptions(unittest.TestCase):
         self.assertEqual(call_kwargs["client_cert"], cert_path)
         self.assertEqual(call_kwargs["client_key"], key_path)
 
+    @patch("kea_exporter.cli.Exporter")
+    @patch("kea_exporter.cli.start_http_server")
+    @patch("kea_exporter.cli.time.sleep")
+    def test_no_tls_verify_flag_forwarded_to_exporter(self, mock_sleep, mock_http_server, mock_exporter):
+        """--no-tls-verify is parsed and forwarded to Exporter as tls_no_verify=True."""
+        mock_sleep.side_effect = KeyboardInterrupt
+        mock_exporter.return_value.targets = [Mock()]
+        mock_http_server.return_value = (Mock(), Mock())
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        runner.invoke(cli, ["--no-tls-verify", "https://kea:443"])
+        call_kwargs = mock_exporter.call_args.kwargs
+        self.assertTrue(call_kwargs.get("tls_no_verify"))
+
+    @patch("kea_exporter.cli.Exporter")
+    @patch("kea_exporter.cli.start_http_server")
+    @patch("kea_exporter.cli.time.sleep")
+    def test_ca_bundle_option_forwarded_to_exporter(self, mock_sleep, mock_http_server, mock_exporter):
+        """--ca-bundle PATH is parsed and forwarded to Exporter as ca_bundle=<path>."""
+        mock_sleep.side_effect = KeyboardInterrupt
+        mock_exporter.return_value.targets = [Mock()]
+        mock_http_server.return_value = (Mock(), Mock())
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        with tempfile.NamedTemporaryFile() as f:
+            runner.invoke(cli, ["--ca-bundle", f.name, "https://kea:443"])
+            call_kwargs = mock_exporter.call_args.kwargs
+            self.assertEqual(call_kwargs.get("ca_bundle"), f.name)
+
 
 class TestCLIWSGIApp(unittest.TestCase):
     """Test WSGI app behavior"""

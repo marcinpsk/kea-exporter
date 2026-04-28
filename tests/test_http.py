@@ -115,6 +115,70 @@ class TestKeaHTTPClientInit(unittest.TestCase):
         # load_modules should have been called (makes a POST request)
         self.assertTrue(mock_post.called)
 
+    @patch("kea_exporter.http.requests.post")
+    def test_init_tls_no_verify_disables_verification(self, mock_post):
+        """tls_no_verify=True passes verify=False to all requests.post calls."""
+        mock_post.return_value = Mock()
+        mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        mock_post.return_value.raise_for_status.return_value = None
+        client = KeaHTTPClient("https://kea:443", tls_no_verify=True)  # noqa: F841
+        self.assertTrue(len(mock_post.call_args_list) > 0)
+        for call in mock_post.call_args_list:
+            self.assertEqual(call.kwargs.get("verify"), False)
+
+    @patch("kea_exporter.http.requests.post")
+    def test_init_ca_bundle_passed_to_requests(self, mock_post):
+        """ca_bundle path is forwarded as verify= to all requests.post calls."""
+        mock_post.return_value = Mock()
+        mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        mock_post.return_value.raise_for_status.return_value = None
+        client = KeaHTTPClient("https://kea:443", ca_bundle="/etc/ssl/my-ca.pem")  # noqa: F841
+        self.assertTrue(len(mock_post.call_args_list) > 0)
+        for call in mock_post.call_args_list:
+            self.assertEqual(call.kwargs.get("verify"), "/etc/ssl/my-ca.pem")
+
+    @patch("kea_exporter.http.requests.post")
+    def test_init_default_tls_verify_is_true(self, mock_post):
+        """Default behaviour verifies TLS (verify=True)."""
+        mock_post.return_value = Mock()
+        mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        mock_post.return_value.raise_for_status.return_value = None
+        client = KeaHTTPClient("https://kea:443")  # noqa: F841
+        self.assertTrue(len(mock_post.call_args_list) > 0)
+        for call in mock_post.call_args_list:
+            self.assertEqual(call.kwargs.get("verify"), True)
+
+    @patch("kea_exporter.http.requests.post")
+    def test_stats_tls_no_verify(self, mock_post):
+        """stats() must forward verify=False when tls_no_verify=True."""
+        init_resp = Mock()
+        init_resp.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        init_resp.raise_for_status.return_value = None
+        stats_resp = Mock()
+        stats_resp.json.return_value = [{"result": 0, "arguments": {}}]
+        stats_resp.raise_for_status.return_value = None
+        # init calls: load_modules (1) + load_subnets (1); stats() adds load_subnets + statistic-get-all
+        mock_post.side_effect = [init_resp, init_resp, init_resp, stats_resp]
+        client = KeaHTTPClient("https://kea:443", tls_no_verify=True)
+        mock_post.reset_mock()
+        mock_post.return_value = stats_resp
+        list(client.stats())
+        self.assertTrue(len(mock_post.call_args_list) > 0)
+        for call in mock_post.call_args_list:
+            self.assertEqual(call.kwargs.get("verify"), False)
+
+    @patch("kea_exporter.http.requests.post")
+    def test_tls_no_verify_takes_precedence_over_ca_bundle(self, mock_post):
+        """When both tls_no_verify and ca_bundle are set, no-verify wins (verify=False)."""
+        mock_post.return_value = Mock()
+        mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        mock_post.return_value.raise_for_status.return_value = None
+        client = KeaHTTPClient(  # noqa: F841
+            "https://kea:443", tls_no_verify=True, ca_bundle="/etc/ssl/certs/ca-certificates.crt"
+        )
+        for call in mock_post.call_args_list:
+            self.assertEqual(call.kwargs.get("verify"), False)
+
 
 class TestKeaHTTPClientLoadModules(unittest.TestCase):
     """Test KeaHTTPClient.load_modules method"""
