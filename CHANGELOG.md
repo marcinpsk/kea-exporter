@@ -1,5 +1,31 @@
 
 
+0.9.0
+
+
+
+ - drop pool label from na_reuses_total and pd_reuses_total
+
+ - drop pool label from na_registered_total; clarify pkt6-addr-reg-reply-received
+
+
+
+
+
+ - update README/EXAMPLES for new options, add CI badge, fix .coverage gitignore
+
+
+
+
+
+ - add support for DHCPv6 address registration metrics (Kea 2.5.5+)
+
+
+
+
+
+
+
 0.8.0
 
 
