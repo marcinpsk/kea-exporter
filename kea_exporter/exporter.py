@@ -582,11 +582,12 @@ class Exporter:
                 ["server", "subnet", "subnet_id", "pool"],
                 registry=self.registry,
             ),
-            # Address Registration (Kea 2.5.5+)
+            # Address Registration (Kea 2.5.5+): registered-nas is subnet-level only
+            # (no pool-level equivalent in Kea), so no pool label.
             "na_registered_total": Gauge(
                 f"{self.prefix_dhcp6}_na_registered_total",
                 "Registered non-temporary addresses via DHCPv6 address registration",
-                ["server", "subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id"],
                 registry=self.registry,
             ),
         }
@@ -610,7 +611,10 @@ class Exporter:
             "pkt6-decline-received": {"metric": "received_packets", "labels": {"operation": "decline"}},
             "pkt6-infrequest-received": {"metric": "received_packets", "labels": {"operation": "infrequest"}},
             "pkt6-unknown-received": {"metric": "received_packets", "labels": {"operation": "unknown"}},
-            # Address Registration received (Kea 2.5.5+)
+            # Address Registration received (Kea 2.5.5+).
+            # pkt6-addr-reg-reply-received "should not happen" on a plain DHCPv6
+            # server (only occurs if acting as relay), but Kea initialises the
+            # counter to 0, so it appears in stats and needs to be mapped.
             "pkt6-addr-reg-inform-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-inform"}},
             "pkt6-addr-reg-reply-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-reply"}},
             # DHCPv4-over-DHCPv6

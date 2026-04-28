@@ -291,7 +291,7 @@ class TestExporterServerLabeling(unittest.TestCase):
         self.assertIn("server", na_registered._labelnames)
         self.assertIn("subnet", na_registered._labelnames)
         self.assertIn("subnet_id", na_registered._labelnames)
-        self.assertIn("pool", na_registered._labelnames)
+        self.assertNotIn("pool", na_registered._labelnames)
 
 
 class TestExporterParseMetrics(unittest.TestCase):
@@ -404,17 +404,22 @@ class TestExporterParseMetrics(unittest.TestCase):
 
     @patch("kea_exporter.exporter.KeaHTTPClient")
     def test_parse_metrics_dhcp6_registered_nas_subnet(self, mock_http):
-        """Test parsing DHCPv6 registered-nas at subnet level (Kea 2.5.5+)"""
+        """Test parsing DHCPv6 registered-nas at subnet level (Kea 2.5.5+).
+
+        registered-nas is a subnet-level stat only — Kea never emits a
+        pool-level equivalent (confirmed in cfg_subnets6.cc updateStatistics).
+        """
         mock_http.return_value = Mock()
         exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
 
         server_id = "http://localhost:8000"
         subnet_id = 5
         subnets = {subnet_id: {"subnet": "2001:db8::/48", "pools": [{"pool": "2001:db8::1-2001:db8::ff"}]}}
-        arguments = {f"subnet[{subnet_id}].pool[0].registered-nas": [[7, "2024-01-01 00:00:00"]]}
+        # Kea emits subnet[N].registered-nas — no pool segment
+        arguments = {f"subnet[{subnet_id}].registered-nas": [[7, "2024-01-01 00:00:00"]]}
 
         mock_gauge = Mock()
-        mock_gauge._labelnames = ["server", "subnet", "subnet_id", "pool"]
+        mock_gauge._labelnames = ["server", "subnet", "subnet_id"]
         mock_gauge.labels = Mock(return_value=mock_gauge)
         exporter.metrics_dhcp6["na_registered_total"] = mock_gauge
 
@@ -424,7 +429,6 @@ class TestExporterParseMetrics(unittest.TestCase):
             server=server_id,
             subnet="2001:db8::/48",
             subnet_id=subnet_id,
-            pool="2001:db8::1-2001:db8::ff",
         )
         mock_gauge.set.assert_called_once_with(7)
 
