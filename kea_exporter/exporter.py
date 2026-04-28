@@ -557,10 +557,11 @@ class Exporter:
                 ["server", "subnet", "subnet_id", "pool"],
                 registry=self.registry,
             ),
+            # v6-ia-na-lease-reuses is subnet-level only in Kea (no pool-level variant)
             "na_reuses_total": Gauge(
                 f"{self.prefix_dhcp6}_na_reuses_total",
                 "Number of IA_NA lease reuses",
-                ["server", "subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id"],
                 registry=self.registry,
             ),
             # IA_PD
@@ -576,10 +577,19 @@ class Exporter:
                 ["server", "subnet", "subnet_id"],
                 registry=self.registry,
             ),
+            # v6-ia-pd-lease-reuses is subnet-level only in Kea (no pool-level variant)
             "pd_reuses_total": Gauge(
                 f"{self.prefix_dhcp6}_pd_reuses_total",
                 "Number of IA_PD lease reuses",
-                ["server", "subnet", "subnet_id", "pool"],
+                ["server", "subnet", "subnet_id"],
+                registry=self.registry,
+            ),
+            # Address Registration (Kea 2.5.5+): registered-nas is subnet-level only
+            # (no pool-level equivalent in Kea), so no pool label.
+            "na_registered_total": Gauge(
+                f"{self.prefix_dhcp6}_na_registered_total",
+                "Registered non-temporary addresses via DHCPv6 address registration",
+                ["server", "subnet", "subnet_id"],
                 registry=self.registry,
             ),
         }
@@ -588,6 +598,8 @@ class Exporter:
             # sent_packets
             "pkt6-advertise-sent": {"metric": "sent_packets", "labels": {"operation": "advertise"}},
             "pkt6-reply-sent": {"metric": "sent_packets", "labels": {"operation": "reply"}},
+            # Address Registration sent (Kea 2.5.5+)
+            "pkt6-addr-reg-reply-sent": {"metric": "sent_packets", "labels": {"operation": "addr-reg-reply"}},
             # received_packets
             "pkt6-receive-drop": {"metric": "received_packets", "labels": {"operation": "drop"}},
             "pkt6-parse-failed": {"metric": "received_packets", "labels": {"operation": "parse-failed"}},
@@ -601,6 +613,12 @@ class Exporter:
             "pkt6-decline-received": {"metric": "received_packets", "labels": {"operation": "decline"}},
             "pkt6-infrequest-received": {"metric": "received_packets", "labels": {"operation": "infrequest"}},
             "pkt6-unknown-received": {"metric": "received_packets", "labels": {"operation": "unknown"}},
+            # Address Registration received (Kea 2.5.5+).
+            # pkt6-addr-reg-reply-received "should not happen" on a plain DHCPv6
+            # server (only occurs if acting as relay), but Kea initialises the
+            # counter to 0, so it appears in stats and needs to be mapped.
+            "pkt6-addr-reg-inform-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-inform"}},
+            "pkt6-addr-reg-reply-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-reply"}},
             # DHCPv4-over-DHCPv6
             "pkt6-dhcpv4-response-sent": {"metric": "sent_dhcp4_packets", "labels": {"operation": "response"}},
             "pkt6-dhcpv4-query-received": {"metric": "received_dhcp4_packets", "labels": {"operation": "query"}},
@@ -624,6 +642,8 @@ class Exporter:
             "v6-reservation-conflicts": {"metric": "reservation_conflicts_total"},
             "v6-ia-na-lease-reuses": {"metric": "na_reuses_total"},
             "v6-ia-pd-lease-reuses": {"metric": "pd_reuses_total"},
+            # Address Registration (Kea 2.5.5+)
+            "registered-nas": {"metric": "na_registered_total"},
         }
 
         # Ignore list for Global level metrics
@@ -634,6 +654,8 @@ class Exporter:
             # sums of different packet types
             "cumulative-assigned-nas",
             "cumulative-assigned-pds",
+            # Address Registration cumulative totals (subnet-level detail is sufficient)
+            "cumulative-registered-nas",
             "reclaimed-declined-addresses",
             "reclaimed-leases",
             "v6-reservation-conflicts",
@@ -652,6 +674,7 @@ class Exporter:
             "cumulative-assigned-addresses",
             "cumulative-assigned-nas",
             "cumulative-assigned-pds",
+            "cumulative-registered-nas",
             "v6-allocation-fail",
         ]
 
