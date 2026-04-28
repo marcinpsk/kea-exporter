@@ -1,3 +1,4 @@
+import signal
 import sys
 import time
 from typing import Any
@@ -143,11 +144,15 @@ def cli(port, address, interval, **kwargs: Any):
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        click.echo("Received signal, shutting down.", err=True)
+        old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             httpd.shutdown()
             httpd.server_close()
         except Exception as e:
             click.echo(f"Error during shutdown: {e}", err=True)
+        finally:
+            signal.signal(signal.SIGINT, old_handler)
         sys.exit(0)
 
 

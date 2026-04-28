@@ -508,5 +508,51 @@ class TestCLIEnvironmentVariables(unittest.TestCase):
         self.assertEqual(len(targets), 2)
 
 
+class TestCLIShutdown(unittest.TestCase):
+    """Test CLI shutdown behaviour"""
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+        self.patcher1 = patch("kea_exporter.cli.REGISTRY", self.registry)
+        self.patcher2 = patch("prometheus_client.REGISTRY", self.registry)
+        self.patcher1.start()
+        self.patcher2.start()
+
+    def tearDown(self):
+        self.patcher1.stop()
+        self.patcher2.stop()
+
+    @patch("kea_exporter.cli.Exporter")
+    @patch("kea_exporter.cli.start_http_server")
+    @patch("kea_exporter.cli.time.sleep")
+    @patch("signal.signal")
+    def test_sigint_ignored_before_httpd_shutdown(self, mock_signal, mock_sleep, mock_http_server, mock_exporter):
+        """signal.signal(SIGINT, SIG_IGN) is called before httpd.shutdown() on KeyboardInterrupt."""
+        import signal as signal_module
+
+        mock_sleep.side_effect = KeyboardInterrupt
+        mock_exporter.return_value.targets = [Mock()]
+        mock_httpd = Mock()
+        mock_http_server.return_value = (mock_httpd, Mock())
+
+        call_order = []
+        mock_signal.side_effect = lambda *args: call_order.append("signal")
+        mock_httpd.shutdown.side_effect = lambda: call_order.append("shutdown")
+
+        from click.testing import CliRunner
+
+        runner = CliRunner()
+        runner.invoke(cli, ["http://localhost:8000"])
+
+        # signal.signal must have been called with SIGINT, SIG_IGN (may not be the last call
+        # since the handler is restored in a finally block)
+        mock_signal.assert_any_call(signal_module.SIGINT, signal_module.SIG_IGN)
+
+        # signal must have been set before shutdown was called
+        self.assertIn("signal", call_order)
+        self.assertIn("shutdown", call_order)
+        self.assertLess(call_order.index("signal"), call_order.index("shutdown"))
+
+
 if __name__ == "__main__":
     unittest.main()

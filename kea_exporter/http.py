@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import sys
 from typing import Any
 from urllib.parse import unquote, urlparse, urlunparse
 
+import click
 import requests
 
 from kea_exporter import DHCPVersion
@@ -81,9 +81,9 @@ class KeaHTTPClient:
         self.timeout = timeout
         if tls_no_verify:
             if ca_bundle:
-                print(
+                click.echo(
                     "Warning: --no-tls-verify takes precedence over --ca-bundle; TLS verification is disabled.",
-                    file=sys.stderr,
+                    err=True,
                 )
             self._verify: bool | str = False
         elif ca_bundle is not None:
@@ -247,9 +247,9 @@ class KeaHTTPClient:
         try:
             self.load_subnets()
         except Exception as e:
-            print(
+            click.echo(
                 f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(e).__name__}: {e}",
-                file=sys.stderr,
+                err=True,
             )
         r = requests.post(
             self._target,

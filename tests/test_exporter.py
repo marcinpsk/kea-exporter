@@ -963,5 +963,130 @@ class TestStalePoolCleanup(unittest.TestCase):
         self.assertIn(pool6, output, "dhcp6 pool label was incorrectly pruned when only dhcp4 succeeded")
 
 
+class TestRetryLimit(unittest.TestCase):
+    """Test retry limit for failed target initialisation."""
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_give_up_after_max_retries(self, mock_echo, mock_http):
+        """Target is skipped and a give-up message logged after MAX_TARGET_RETRIES failures."""
+        from kea_exporter.exporter import MAX_TARGET_RETRIES
+
+        mock_http.side_effect = OSError("Connection refused")
+        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
+
+        # Target should be a placeholder dict
+        self.assertIsInstance(exporter.targets[0], dict)
+
+        mock_echo.reset_mock()
+
+        # Exhaust all retries
+        for _ in range(MAX_TARGET_RETRIES):
+            exporter.update()
+
+        # Give-up message must have been logged (on the final retry)
+        logged_msgs = [call[0][0] for call in mock_echo.call_args_list]
+        self.assertTrue(
+            any("giving up" in msg.lower() for msg in logged_msgs),
+            f"Expected give-up message; got: {logged_msgs}",
+        )
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_no_init_attempt_after_max_retries(self, mock_echo, mock_http):
+        """After MAX_TARGET_RETRIES the client constructor is no longer called."""
+        from kea_exporter.exporter import MAX_TARGET_RETRIES
+
+        mock_http.side_effect = OSError("Connection refused")
+        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
+
+        # Exhaust all retries
+        for _ in range(MAX_TARGET_RETRIES):
+            exporter.update()
+
+        # Reset to detect any further calls
+        mock_http.reset_mock()
+        mock_echo.reset_mock()
+
+        exporter.update()
+
+        # No further attempt to create the client
+        mock_http.assert_not_called()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_successful_recovery_replaces_placeholder(self, mock_echo, mock_http):
+        """After an initial failure, a successful re-init replaces the placeholder and stats() is called."""
+        mock_client = Mock()
+        mock_client.stats.return_value = iter([])
+        # First call (during __init__) raises; second call (during update) succeeds
+        mock_http.side_effect = [OSError("initial failure"), mock_client]
+
+        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
+
+        # Target should be a placeholder dict after init failure
+        self.assertIsInstance(exporter.targets[0], dict)
+
+        # Next update() triggers _try_init_target which now succeeds
+        exporter.update()
+
+        # Placeholder should have been replaced with the real client
+        self.assertIs(exporter.targets[0], mock_client)
+
+        # stats() should have been called on the recovered client
+        mock_client.stats.assert_called_once()
+
+
+class TestGaugeRemoveExceptionHandling(unittest.TestCase):
+    """Test narrowed exception handling in gauge.remove() during stale-label pruning."""
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_keyerror_from_gauge_remove_is_silenced(self, mock_http):
+        """KeyError raised by gauge.remove() is silently ignored."""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+        exporter.targets = []  # No live targets; only stale-label pruning runs
+
+        mock_gauge = Mock()
+        mock_gauge._labelnames = []  # No "server" label → server_idx is None → remove is always called
+        mock_gauge.remove.side_effect = KeyError("label not found")
+
+        exporter._seen_labels_previous = {id(mock_gauge): (mock_gauge, {()})}
+
+        # Must not raise
+        exporter.update()
+        mock_gauge.remove.assert_called_once_with()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_unexpected_exception_from_gauge_remove_is_logged(self, mock_echo, mock_http):
+        """A non-KeyError from gauge.remove() is logged to stderr."""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+        exporter.targets = []
+
+        mock_gauge = Mock()
+        mock_gauge._labelnames = []  # no "server" label → server_idx=None → remove() called without server key lookup
+        mock_gauge.remove.side_effect = ValueError("something went wrong")
+
+        exporter._seen_labels_previous = {id(mock_gauge): (mock_gauge, {()})}
+
+        # Must not raise
+        exporter.update()
+
+        # An error message must have been logged (with err=True)
+        err_msgs = [call[0][0] for call in mock_echo.call_args_list if call[1].get("err")]
+        self.assertTrue(
+            any("Unexpected error removing gauge label" in m for m in err_msgs),
+            f"Expected error log; got err= calls: {err_msgs}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

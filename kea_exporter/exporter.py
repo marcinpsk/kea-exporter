@@ -10,6 +10,8 @@ from kea_exporter import DHCPVersion
 from kea_exporter.http import KeaHTTPClient
 from kea_exporter.uds import KeaSocketClient
 
+MAX_TARGET_RETRIES = 10
+
 
 class Exporter:
     subnet_pattern = re.compile(
@@ -115,10 +117,53 @@ class Exporter:
                     safe_target = f"{parsed.scheme}://{safe_host}{parsed.path}"
                 click.echo(f"Failed to initialize target {safe_target}: {type(ex).__name__}: {ex}")
                 # Keep placeholder so update() can retry initialization
-                self.targets.append({"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs})
+                self.targets.append(
+                    {"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs, "retry_count": 0}
+                )
                 continue
 
             self.targets.append(client)
+
+    def _try_init_target(self, i: int, target: dict):
+        """Attempt to re-initialize a failed target placeholder.
+
+        Returns the newly created client on success, or None if the attempt
+        was skipped (retry limit reached) or failed.
+        """
+        raw = target["target"]
+        retry_count = target["retry_count"]
+        if retry_count >= MAX_TARGET_RETRIES:
+            return None
+        url = urlparse(raw)
+        try:
+            if url.scheme:
+                client = KeaHTTPClient(raw, **target["kwargs"])
+            elif url.path:
+                client = KeaSocketClient(raw, **target["kwargs"])
+            else:
+                return None
+            self.targets[i] = client
+            click.echo(f"Successfully initialized previously failed target: {getattr(client, '_server_id', raw)}")
+            return client
+        except Exception as ex:
+            target["retry_count"] = retry_count + 1
+            if target["retry_count"] >= MAX_TARGET_RETRIES:
+                safe_id = raw
+                try:
+                    parsed = urlparse(raw)
+                    if parsed.username:
+                        safe_host = parsed.hostname
+                        if parsed.port:
+                            safe_host = f"{safe_host}:{parsed.port}"
+                        safe_id = f"{parsed.scheme}://{safe_host}{parsed.path}"
+                except Exception:
+                    pass  # non-URL paths (UDS socket paths) pass through unchanged
+                click.echo(
+                    f"Target {safe_id} failed to initialize after {MAX_TARGET_RETRIES} retries, giving up.",
+                    err=True,
+                )
+            target["last_error"] = str(ex)
+            return None
 
     def update(self):
         """
@@ -140,22 +185,8 @@ class Exporter:
         for i, target in enumerate(self.targets):
             # Retry uninitialized targets
             if isinstance(target, dict) and target.get("client") is None:
-                raw = target["target"]
-                url = urlparse(raw)
-                try:
-                    if url.scheme:
-                        client = KeaHTTPClient(raw, **target["kwargs"])
-                    elif url.path:
-                        client = KeaSocketClient(raw, **target["kwargs"])
-                    else:
-                        continue
-                    self.targets[i] = client
-                    target = client
-                    click.echo(
-                        f"Successfully initialized previously failed target: {getattr(client, '_server_id', raw)}"
-                    )
-                except Exception as ex:
-                    target["last_error"] = str(ex)
+                target = self._try_init_target(i, target)
+                if target is None:
                     continue
 
             try:
@@ -210,8 +241,10 @@ class Exporter:
                 if scraped_ok or timed_out or server_idx is None:
                     try:
                         gauge.remove(*label_tuple)
-                    except Exception:
+                    except KeyError:
                         pass
+                    except Exception as e:
+                        click.echo(f"Unexpected error removing gauge label: {e}", err=True)
                 else:
                     # Scrape failed and timeout not yet exceeded — keep the
                     # tuple in tracking so it can be pruned on a later cycle.
