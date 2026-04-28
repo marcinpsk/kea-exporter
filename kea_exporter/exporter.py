@@ -63,6 +63,17 @@ class Exporter:
         self.ddns_key_pattern = None
         self.setup_ddns_metrics()
 
+        # Maps id(gauge) -> DHCPVersion so the pruning loop can determine
+        # which DHCP version a gauge belongs to without threading dhcp_version
+        # through _set_metric.
+        self._gauge_to_dhcp_version: dict[int, DHCPVersion] = {}
+        for g in self.metrics_dhcp4.values():
+            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DHCP4
+        for g in self.metrics_dhcp6.values():
+            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DHCP6
+        for g in self.metrics_ddns.values():
+            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DDNS
+
         # track unhandled metric keys, to notify only once
         self.unhandled_metrics = set()
 
@@ -77,7 +88,7 @@ class Exporter:
         # Stale-label timeout: prune labels for servers silent longer than this.
         # 0 means disabled (default).
         self.stale_timeout = stale_timeout
-        self._last_success: dict[str, float] = {}
+        self._last_success: dict[tuple[str, DHCPVersion], float] = {}
 
         self.targets = []
         for target in targets:
@@ -124,7 +135,7 @@ class Exporter:
         dropping valid metrics due to transient scrape failures.
         """
         self._seen_labels_current = {}
-        successful_servers: set = set()
+        successful_servers: set[tuple[str, DHCPVersion]] = set()
 
         for i, target in enumerate(self.targets):
             # Retry uninitialized targets
@@ -148,14 +159,14 @@ class Exporter:
                     continue
 
             try:
-                completed_servers = set()
+                completed_server_versions: set[tuple[str, DHCPVersion]] = set()
                 for server_id, dhcp_version, arguments, subnets in target.stats():
                     self.parse_metrics(server_id, dhcp_version, arguments, subnets)
-                    completed_servers.add(server_id)
+                    completed_server_versions.add((server_id, dhcp_version))
                 scrape_finished_at = time.monotonic()
-                for server_id in completed_servers:
-                    successful_servers.add(server_id)
-                    self._last_success[server_id] = scrape_finished_at
+                for sv_pair in completed_server_versions:
+                    successful_servers.add(sv_pair)
+                    self._last_success[sv_pair] = scrape_finished_at
             except Exception as ex:
                 click.echo(
                     f"Failed to collect metrics from {getattr(target, '_server_id', target)}: "
@@ -181,14 +192,20 @@ class Exporter:
                 continue
             label_names = list(gauge._labelnames)
             server_idx = label_names.index("server") if "server" in label_names else None
+            gauge_dhcp_version = self._gauge_to_dhcp_version.get(gauge_id)
             for label_tuple in stale:
                 server_id_val = label_tuple[server_idx] if server_idx is not None else None
-                scraped_ok = server_id_val in successful_servers
+                sv_pair = (
+                    (server_id_val, gauge_dhcp_version)
+                    if server_id_val is not None and gauge_dhcp_version is not None
+                    else None
+                )
+                scraped_ok = sv_pair in successful_servers if sv_pair is not None else False
                 timed_out = (
                     self.stale_timeout > 0
-                    and server_id_val is not None
-                    and server_id_val in self._last_success
-                    and (time.monotonic() - self._last_success[server_id_val]) > self.stale_timeout
+                    and sv_pair is not None
+                    and sv_pair in self._last_success
+                    and (time.monotonic() - self._last_success[sv_pair]) > self.stale_timeout
                 )
                 if scraped_ok or timed_out or server_idx is None:
                     try:

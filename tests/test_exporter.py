@@ -911,6 +911,57 @@ class TestStalePoolCleanup(unittest.TestCase):
             exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
         self.assertEqual(exporter.stale_timeout, 0)
 
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_dhcp6_labels_not_pruned_when_only_dhcp4_succeeds(self, mock_http):
+        """dhcp6 labels are preserved when dhcp4 scrape succeeds but dhcp6 is absent."""
+        from prometheus_client import generate_latest
+
+        server = "http://kea:53100"
+        subnet_id = 1
+        subnet4 = "10.0.0.0/24"
+        subnet6 = "2001:db8::/64"
+        pool4 = "10.0.0.10-10.0.0.20"
+        pool6 = "2001:db8::10-2001:db8::20"
+
+        subnets4 = {subnet_id: {"subnet": subnet4, "pools": [{"pool": pool4}]}}
+        subnets6 = {subnet_id: {"subnet": subnet6, "pools": [{"pool": pool6}]}}
+        args4 = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[5, "2024-01-01"]]}
+        args6 = {f"subnet[{subnet_id}].pool[0].assigned-nas": [[3, "2024-01-01"]]}
+
+        mock_client = Mock()
+        mock_client._server_id = server
+        # First scrape: both dhcp4 and dhcp6 succeed
+        # Second scrape: only dhcp4 succeeds (dhcp6 absent — simulates result!=0)
+        mock_client.stats.side_effect = [
+            iter(
+                [
+                    (server, DHCPVersion.DHCP4, args4, subnets4),
+                    (server, DHCPVersion.DHCP6, args6, subnets6),
+                ]
+            ),
+            iter(
+                [
+                    (server, DHCPVersion.DHCP4, args4, subnets4),
+                    # dhcp6 absent
+                ]
+            ),
+        ]
+        mock_http.return_value = mock_client
+
+        exporter = Exporter(targets=["http://kea:53100"], registry=self.registry)
+
+        # First update: both modules scraped, both labels present
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool4, output)
+        self.assertIn(pool6, output)
+
+        # Second update: dhcp4 succeeds, dhcp6 absent — dhcp6 label MUST NOT be pruned
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool4, output)
+        self.assertIn(pool6, output, "dhcp6 pool label was incorrectly pruned when only dhcp4 succeeded")
+
 
 if __name__ == "__main__":
     unittest.main()
