@@ -1,5 +1,6 @@
 import re
 import sys
+import time
 from urllib.parse import urlparse
 
 import click
@@ -17,7 +18,7 @@ class Exporter:
         r"|(?P<subnet_metric>[\w-]+))$"
     )
 
-    def __init__(self, targets, registry=None, **kwargs) -> None:
+    def __init__(self, targets, stale_timeout: int = 0, registry=None, **kwargs) -> None:
         # prometheus
         """
         Initialize the Exporter: configure metric prefixes and metric
@@ -68,6 +69,16 @@ class Exporter:
         # track missing info per (server_id, dhcp_version), to notify only once
         self.subnet_missing_info_sent = {}
 
+        # Track label combinations set in the current and previous scrape cycle.
+        # Used to detect and remove stale metric children (e.g. renamed pools).
+        self._seen_labels_current: dict = {}
+        self._seen_labels_previous: dict = {}
+
+        # Stale-label timeout: prune labels for servers silent longer than this.
+        # 0 means disabled (default).
+        self.stale_timeout = stale_timeout
+        self._last_success: dict[str, float] = {}
+
         self.targets = []
         for target in targets:
             url = urlparse(target)
@@ -107,7 +118,14 @@ class Exporter:
         metric responses, and processes each response so the exporter's
         metric gauges reflect the latest values. Uninitialized targets
         (from failed client creation) are retried each update cycle.
+        After all targets are processed, label combinations that existed in
+        the previous cycle but not this one are removed from the registry —
+        but only for servers that successfully responded this cycle, to avoid
+        dropping valid metrics due to transient scrape failures.
         """
+        self._seen_labels_current = {}
+        successful_servers: set = set()
+
         for i, target in enumerate(self.targets):
             # Retry uninitialized targets
             if isinstance(target, dict) and target.get("client") is None:
@@ -130,14 +148,44 @@ class Exporter:
                     continue
 
             try:
-                for response in target.stats():
-                    self.parse_metrics(*response)
+                for server_id, dhcp_version, arguments, subnets in target.stats():
+                    self.parse_metrics(server_id, dhcp_version, arguments, subnets)
+                    successful_servers.add(server_id)
+                    self._last_success[server_id] = time.monotonic()
             except Exception as ex:
                 click.echo(
                     f"Failed to collect metrics from {getattr(target, '_server_id', target)}: "
                     f"{type(ex).__name__}: {ex}",
                     err=True,
                 )
+
+        # Remove stale label combinations (e.g. a renamed pool) that were
+        # present last cycle but absent this cycle.  Only do this for servers
+        # that successfully delivered metrics this cycle; transient failures
+        # should not cause valid metrics to be pruned.
+        for gauge_id, (gauge, prev_tuples) in self._seen_labels_previous.items():
+            current_tuples = self._seen_labels_current.get(gauge_id, (None, set()))[1]
+            stale = prev_tuples - current_tuples
+            if not stale:
+                continue
+            label_names = list(gauge._labelnames)
+            server_idx = label_names.index("server") if "server" in label_names else None
+            for label_tuple in stale:
+                server_id_val = label_tuple[server_idx] if server_idx is not None else None
+                scraped_ok = server_id_val in successful_servers
+                timed_out = (
+                    self.stale_timeout > 0
+                    and server_id_val is not None
+                    and server_id_val in self._last_success
+                    and (time.monotonic() - self._last_success[server_id_val]) > self.stale_timeout
+                )
+                if scraped_ok or timed_out or server_idx is None:
+                    try:
+                        gauge.remove(*label_tuple)
+                    except Exception:
+                        pass
+
+        self._seen_labels_previous = self._seen_labels_current
 
     def setup_dhcp4_metrics(self):
         """
@@ -707,13 +755,18 @@ class Exporter:
         self._set_metric(metric, labels, value)
         return True
 
-    @staticmethod
-    def _set_metric(metric, labels, value):
+    def _set_metric(self, metric, labels, value):
         """Filter labels to those configured on the metric and set the value."""
         # _labelnames is a private attribute of prometheus_client.Gauge but
         # there is no public accessor; access is centralised here.
         filtered = {k: v for k, v in labels.items() if k in metric._labelnames}
         metric.labels(**filtered).set(value)
+        # Record this label combination so stale entries can be pruned later.
+        gauge_id = id(metric)
+        if gauge_id not in self._seen_labels_current:
+            self._seen_labels_current[gauge_id] = (metric, set())
+        label_tuple = tuple(str(filtered.get(k, "")) for k in metric._labelnames)
+        self._seen_labels_current[gauge_id][1].add(label_tuple)
 
     def _report_unhandled(self, key, message):
         """Report an unhandled metric key once."""

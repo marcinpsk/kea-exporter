@@ -67,6 +67,16 @@ class Timer:
     default=10,
     help="Timeout for HTTP requests in seconds.",
 )
+@click.option(
+    "--stale-timeout",
+    envvar="STALE_TIMEOUT",
+    type=click.IntRange(min=0),
+    default=0,
+    help=(
+        "Remove metrics for a server that has not responded for this many seconds. "
+        "0 disables the timeout (default)."
+    ),
+)
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
 @click.version_option(prog_name=__project__, version=__version__)
 def cli(port, address, interval, **kwargs: Any):
