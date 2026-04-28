@@ -7,32 +7,33 @@ name: Release
     branches:
       - main
 
+# Default: least-privileged permissions across all jobs
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   semantic-release:
     name: Semantic Release
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-release-${{ github.ref_name }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
     outputs:
       released: ${{ steps.release.outputs.released }}
       tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
           fetch-tags: true
           token: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: uv sync --group dev
+      - name: Force release branch to workflow SHA
+        run: git reset --hard ${{ github.sha }}
 
       - name: Debug git state
         if: github.event_name == 'workflow_dispatch'
@@ -43,24 +44,15 @@ jobs:
           git branch -v
           echo "=== Last 12 commits ==="
           git log --oneline -12
-          echo "=== semantic-release --print ==="
-          uv run semantic-release version --print || echo "print failed"
 
       - name: Run semantic-release
         id: release
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          BEFORE=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
-          uv run semantic-release -vv version --changelog --push
-          AFTER=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
-          if [ "$BEFORE" != "$AFTER" ]; then
-            echo "released=true" >> $GITHUB_OUTPUT
-            echo "tag=$AFTER" >> $GITHUB_OUTPUT
-          else
-            echo "released=false" >> $GITHUB_OUTPUT
-          fi
+        uses: python-semantic-release/python-semantic-release@350c48fcb3ffcdfd2e0a235206bc2ecea6b69df0  # v10.5.3
+        with:
+          github_token: ${{ secrets.RELEASE_TOKEN }}
+          changelog: "true"
+          push: "true"
+          verbosity: "2"
 
   publish:
     name: Publish to PyPI

@@ -1,5 +1,6 @@
 import re
 import sys
+import time
 from urllib.parse import urlparse
 
 import click
@@ -9,6 +10,8 @@ from kea_exporter import DHCPVersion
 from kea_exporter.http import KeaHTTPClient
 from kea_exporter.uds import KeaSocketClient
 
+MAX_TARGET_RETRIES = 10
+
 
 class Exporter:
     subnet_pattern = re.compile(
@@ -17,7 +20,7 @@ class Exporter:
         r"|(?P<subnet_metric>[\w-]+))$"
     )
 
-    def __init__(self, targets, registry=None, **kwargs) -> None:
+    def __init__(self, targets, stale_timeout: int = 0, registry=None, **kwargs) -> None:
         # prometheus
         """
         Initialize the Exporter: configure metric prefixes and metric
@@ -62,11 +65,32 @@ class Exporter:
         self.ddns_key_pattern = None
         self.setup_ddns_metrics()
 
+        # Maps id(gauge) -> DHCPVersion so the pruning loop can determine
+        # which DHCP version a gauge belongs to without threading dhcp_version
+        # through _set_metric.
+        self._gauge_to_dhcp_version: dict[int, DHCPVersion] = {}
+        for g in self.metrics_dhcp4.values():
+            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DHCP4
+        for g in self.metrics_dhcp6.values():
+            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DHCP6
+        for g in self.metrics_ddns.values():
+            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DDNS
+
         # track unhandled metric keys, to notify only once
         self.unhandled_metrics = set()
 
         # track missing info per (server_id, dhcp_version), to notify only once
         self.subnet_missing_info_sent = {}
+
+        # Track label combinations set in the current and previous scrape cycle.
+        # Used to detect and remove stale metric children (e.g. renamed pools).
+        self._seen_labels_current: dict = {}
+        self._seen_labels_previous: dict = {}
+
+        # Stale-label timeout: prune labels for servers silent longer than this.
+        # 0 means disabled (default).
+        self.stale_timeout = stale_timeout
+        self._last_success: dict[tuple[str, DHCPVersion], float] = {}
 
         self.targets = []
         for target in targets:
@@ -93,10 +117,53 @@ class Exporter:
                     safe_target = f"{parsed.scheme}://{safe_host}{parsed.path}"
                 click.echo(f"Failed to initialize target {safe_target}: {type(ex).__name__}: {ex}")
                 # Keep placeholder so update() can retry initialization
-                self.targets.append({"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs})
+                self.targets.append(
+                    {"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs, "retry_count": 0}
+                )
                 continue
 
             self.targets.append(client)
+
+    def _try_init_target(self, i: int, target: dict):
+        """Attempt to re-initialize a failed target placeholder.
+
+        Returns the newly created client on success, or None if the attempt
+        was skipped (retry limit reached) or failed.
+        """
+        raw = target["target"]
+        retry_count = target["retry_count"]
+        if retry_count >= MAX_TARGET_RETRIES:
+            return None
+        url = urlparse(raw)
+        try:
+            if url.scheme:
+                client = KeaHTTPClient(raw, **target["kwargs"])
+            elif url.path:
+                client = KeaSocketClient(raw, **target["kwargs"])
+            else:
+                return None
+            self.targets[i] = client
+            click.echo(f"Successfully initialized previously failed target: {getattr(client, '_server_id', raw)}")
+            return client
+        except Exception as ex:
+            target["retry_count"] = retry_count + 1
+            if target["retry_count"] >= MAX_TARGET_RETRIES:
+                safe_id = raw
+                try:
+                    parsed = urlparse(raw)
+                    if parsed.username:
+                        safe_host = parsed.hostname
+                        if parsed.port:
+                            safe_host = f"{safe_host}:{parsed.port}"
+                        safe_id = f"{parsed.scheme}://{safe_host}{parsed.path}"
+                except Exception:
+                    pass  # non-URL paths (UDS socket paths) pass through unchanged
+                click.echo(
+                    f"Target {safe_id} failed to initialize after {MAX_TARGET_RETRIES} retries, giving up.",
+                    err=True,
+                )
+            target["last_error"] = str(ex)
+            return None
 
     def update(self):
         """
@@ -107,37 +174,87 @@ class Exporter:
         metric responses, and processes each response so the exporter's
         metric gauges reflect the latest values. Uninitialized targets
         (from failed client creation) are retried each update cycle.
+        After all targets are processed, label combinations that existed in
+        the previous cycle but not this one are removed from the registry —
+        but only for servers that successfully responded this cycle, to avoid
+        dropping valid metrics due to transient scrape failures.
         """
+        self._seen_labels_current = {}
+        successful_servers: set[tuple[str, DHCPVersion]] = set()
+
         for i, target in enumerate(self.targets):
             # Retry uninitialized targets
             if isinstance(target, dict) and target.get("client") is None:
-                raw = target["target"]
-                url = urlparse(raw)
-                try:
-                    if url.scheme:
-                        client = KeaHTTPClient(raw, **target["kwargs"])
-                    elif url.path:
-                        client = KeaSocketClient(raw, **target["kwargs"])
-                    else:
-                        continue
-                    self.targets[i] = client
-                    target = client
-                    click.echo(
-                        f"Successfully initialized previously failed target: {getattr(client, '_server_id', raw)}"
-                    )
-                except Exception as ex:
-                    target["last_error"] = str(ex)
+                target = self._try_init_target(i, target)
+                if target is None:
                     continue
 
             try:
-                for response in target.stats():
-                    self.parse_metrics(*response)
+                # Materialise the generator before mutating any gauges so that a
+                # mid-stream exception cannot leave a partial snapshot in the registry
+                # or seed _seen_labels_current with incomplete label tuples.
+                stats_rows = list(target.stats())
+                completed_server_versions: set[tuple[str, DHCPVersion]] = set()
+                for server_id, dhcp_version, arguments, subnets in stats_rows:
+                    self.parse_metrics(server_id, dhcp_version, arguments, subnets)
+                    completed_server_versions.add((server_id, dhcp_version))
+                scrape_finished_at = time.monotonic()
+                for sv_pair in completed_server_versions:
+                    successful_servers.add(sv_pair)
+                    self._last_success[sv_pair] = scrape_finished_at
             except Exception as ex:
                 click.echo(
                     f"Failed to collect metrics from {getattr(target, '_server_id', target)}: "
                     f"{type(ex).__name__}: {ex}",
                     err=True,
                 )
+
+        # Remove stale label combinations (e.g. a renamed pool) that were
+        # present last cycle but absent this cycle.  Only do this for servers
+        # that successfully delivered metrics this cycle; transient failures
+        # should not cause valid metrics to be pruned.
+        # Seed next_seen_labels from the current cycle; unpruned stale tuples
+        # for silent servers are merged in below so they remain trackable.
+        next_seen_labels: dict = {
+            gauge_id: (gauge, set(current_tuples))
+            for gauge_id, (gauge, current_tuples) in self._seen_labels_current.items()
+        }
+
+        for gauge_id, (gauge, prev_tuples) in self._seen_labels_previous.items():
+            current_tuples = self._seen_labels_current.get(gauge_id, (None, set()))[1]
+            stale = prev_tuples - current_tuples
+            if not stale:
+                continue
+            label_names = list(gauge._labelnames)
+            server_idx = label_names.index("server") if "server" in label_names else None
+            gauge_dhcp_version = self._gauge_to_dhcp_version.get(gauge_id)
+            for label_tuple in stale:
+                server_id_val = label_tuple[server_idx] if server_idx is not None else None
+                sv_pair = (
+                    (server_id_val, gauge_dhcp_version)
+                    if server_id_val is not None and gauge_dhcp_version is not None
+                    else None
+                )
+                scraped_ok = sv_pair in successful_servers if sv_pair is not None else False
+                timed_out = (
+                    self.stale_timeout > 0
+                    and sv_pair is not None
+                    and sv_pair in self._last_success
+                    and (time.monotonic() - self._last_success[sv_pair]) > self.stale_timeout
+                )
+                if scraped_ok or timed_out or server_idx is None:
+                    try:
+                        gauge.remove(*label_tuple)
+                    except KeyError:
+                        pass
+                    except Exception as e:
+                        click.echo(f"Unexpected error removing gauge label: {e}", err=True)
+                else:
+                    # Scrape failed and timeout not yet exceeded — keep the
+                    # tuple in tracking so it can be pruned on a later cycle.
+                    next_seen_labels.setdefault(gauge_id, (gauge, set()))[1].add(label_tuple)
+
+        self._seen_labels_previous = next_seen_labels
 
     def setup_dhcp4_metrics(self):
         """
@@ -707,13 +824,18 @@ class Exporter:
         self._set_metric(metric, labels, value)
         return True
 
-    @staticmethod
-    def _set_metric(metric, labels, value):
+    def _set_metric(self, metric, labels, value):
         """Filter labels to those configured on the metric and set the value."""
         # _labelnames is a private attribute of prometheus_client.Gauge but
         # there is no public accessor; access is centralised here.
         filtered = {k: v for k, v in labels.items() if k in metric._labelnames}
         metric.labels(**filtered).set(value)
+        # Record this label combination so stale entries can be pruned later.
+        gauge_id = id(metric)
+        if gauge_id not in self._seen_labels_current:
+            self._seen_labels_current[gauge_id] = (metric, set())
+        label_tuple = tuple(str(filtered.get(k, "")) for k in metric._labelnames)
+        self._seen_labels_current[gauge_id][1].add(label_tuple)
 
     def _report_unhandled(self, key, message):
         """Report an unhandled metric key once."""

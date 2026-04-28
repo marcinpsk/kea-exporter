@@ -748,5 +748,345 @@ class TestExporterSubnetPattern(unittest.TestCase):
         self.assertEqual(match.group("subnet_metric"), "total-addresses")
 
 
+class TestStalePoolCleanup(unittest.TestCase):
+    """Stale label removal after pool rename or deletion."""
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_renamed_pool_label_removed_on_next_scrape(self, mock_http):
+        """Old pool label combo is pruned after the pool range is renamed in Kea."""
+        from prometheus_client import generate_latest
+
+        server = "http://kea-dhcp4:53100"
+        subnet_id = 2
+        subnet = "172.30.150.0/24"
+        old_pool = "172.30.150.209-172.30.150.250"
+        new_pool = "172.30.150.209-172.30.150.210"
+
+        subnets_old = {subnet_id: {"subnet": subnet, "pools": [{"pool": old_pool}]}}
+        args_old = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[5, "2024-01-01"]]}
+
+        subnets_new = {subnet_id: {"subnet": subnet, "pools": [{"pool": new_pool}]}}
+        args_new = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[3, "2024-01-01"]]}
+
+        mock_client = Mock()
+        mock_client.stats.side_effect = [
+            iter([(server, DHCPVersion.DHCP4, args_old, subnets_old)]),
+            iter([(server, DHCPVersion.DHCP4, args_new, subnets_new)]),
+        ]
+        mock_http.return_value = mock_client
+
+        exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
+
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertIn(old_pool, output)
+
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertNotIn(old_pool, output)
+        self.assertIn(new_pool, output)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_stale_label_not_pruned_when_server_scrape_fails(self, mock_http):
+        """Labels from a server that failed to scrape are not pruned."""
+        from prometheus_client import generate_latest
+
+        server = "http://kea-dhcp4:53100"
+        subnet_id = 1
+        subnet = "10.0.0.0/24"
+        pool = "10.0.0.100-10.0.0.200"
+
+        subnets = {subnet_id: {"subnet": subnet, "pools": [{"pool": pool}]}}
+        args = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[7, "2024-01-01"]]}
+
+        mock_client = Mock()
+        mock_client._server_id = server
+        mock_client.stats.side_effect = [
+            iter([(server, DHCPVersion.DHCP4, args, subnets)]),
+            ConnectionError("target down"),
+        ]
+        mock_http.return_value = mock_client
+
+        exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
+
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool, output)
+
+        # Scrape fails — labels should be preserved, not pruned
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool, output)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_stale_label_pruned_after_timeout(self, mock_http):
+        """Labels are pruned when stale_timeout expires after a scrape failure.
+
+        Covers the full sequence: success → fail before timeout → fail after timeout.
+        """
+        from prometheus_client import generate_latest
+
+        server = "http://kea-dhcp4:53100"
+        subnet_id = 1
+        subnet = "10.0.0.0/24"
+        pool = "10.0.0.100-10.0.0.200"
+
+        subnets = {subnet_id: {"subnet": subnet, "pools": [{"pool": pool}]}}
+        args = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[7, "2024-01-01"]]}
+
+        mock_client = Mock()
+        mock_client._server_id = server
+        mock_client.stats.side_effect = [
+            iter([(server, DHCPVersion.DHCP4, args, subnets)]),
+            ConnectionError("target down"),
+            ConnectionError("target down"),
+        ]
+        mock_http.return_value = mock_client
+
+        exporter = Exporter(targets=["http://kea-dhcp4:53100"], stale_timeout=60, registry=self.registry)
+
+        with patch("kea_exporter.exporter.time.monotonic", return_value=0.0):
+            exporter.update()
+
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool, output)
+
+        # Scrape fails before timeout — label must still be present
+        with patch("kea_exporter.exporter.time.monotonic", return_value=30.0):
+            exporter.update()
+
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool, output)
+
+        # Advance time past stale_timeout, then scrape fails — label must be pruned
+        with patch("kea_exporter.exporter.time.monotonic", return_value=61.0):
+            exporter.update()
+
+        output = generate_latest(self.registry).decode()
+        self.assertNotIn(pool, output)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_stale_label_not_pruned_when_timeout_disabled(self, mock_http):
+        """Labels persist after repeated scrape failures when stale_timeout=0."""
+        from prometheus_client import generate_latest
+
+        server = "http://kea-dhcp4:53100"
+        subnet_id = 1
+        subnet = "10.0.0.0/24"
+        pool = "10.0.0.100-10.0.0.200"
+
+        subnets = {subnet_id: {"subnet": subnet, "pools": [{"pool": pool}]}}
+        args = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[7, "2024-01-01"]]}
+
+        mock_client = Mock()
+        mock_client._server_id = server
+        mock_client.stats.side_effect = [
+            iter([(server, DHCPVersion.DHCP4, args, subnets)]),
+            ConnectionError("target down"),
+            ConnectionError("target down"),
+        ]
+        mock_http.return_value = mock_client
+
+        exporter = Exporter(targets=["http://kea-dhcp4:53100"], stale_timeout=0, registry=self.registry)
+
+        with patch("kea_exporter.exporter.time.monotonic", return_value=0.0):
+            exporter.update()
+
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool, output)
+
+        with patch("kea_exporter.exporter.time.monotonic", return_value=9999.0):
+            exporter.update()
+            exporter.update()
+
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool, output)
+
+    def test_stale_timeout_zero_is_default(self):
+        """Exporter.stale_timeout defaults to 0 when not specified."""
+        with patch("kea_exporter.exporter.KeaHTTPClient"):
+            exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
+        self.assertEqual(exporter.stale_timeout, 0)
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_dhcp6_labels_not_pruned_when_only_dhcp4_succeeds(self, mock_http):
+        """dhcp6 labels are preserved when dhcp4 scrape succeeds but dhcp6 is absent."""
+        from prometheus_client import generate_latest
+
+        server = "http://kea:53100"
+        subnet_id = 1
+        subnet4 = "10.0.0.0/24"
+        subnet6 = "2001:db8::/64"
+        pool4 = "10.0.0.10-10.0.0.20"
+        pool6 = "2001:db8::10-2001:db8::20"
+
+        subnets4 = {subnet_id: {"subnet": subnet4, "pools": [{"pool": pool4}]}}
+        subnets6 = {subnet_id: {"subnet": subnet6, "pools": [{"pool": pool6}]}}
+        args4 = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[5, "2024-01-01"]]}
+        args6 = {f"subnet[{subnet_id}].pool[0].assigned-nas": [[3, "2024-01-01"]]}
+
+        mock_client = Mock()
+        mock_client._server_id = server
+        # First scrape: both dhcp4 and dhcp6 succeed
+        # Second scrape: only dhcp4 succeeds (dhcp6 absent — simulates result!=0)
+        mock_client.stats.side_effect = [
+            iter(
+                [
+                    (server, DHCPVersion.DHCP4, args4, subnets4),
+                    (server, DHCPVersion.DHCP6, args6, subnets6),
+                ]
+            ),
+            iter(
+                [
+                    (server, DHCPVersion.DHCP4, args4, subnets4),
+                    # dhcp6 absent
+                ]
+            ),
+        ]
+        mock_http.return_value = mock_client
+
+        exporter = Exporter(targets=["http://kea:53100"], registry=self.registry)
+
+        # First update: both modules scraped, both labels present
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool4, output)
+        self.assertIn(pool6, output)
+
+        # Second update: dhcp4 succeeds, dhcp6 absent — dhcp6 label MUST NOT be pruned
+        exporter.update()
+        output = generate_latest(self.registry).decode()
+        self.assertIn(pool4, output)
+        self.assertIn(pool6, output, "dhcp6 pool label was incorrectly pruned when only dhcp4 succeeded")
+
+
+class TestRetryLimit(unittest.TestCase):
+    """Test retry limit for failed target initialisation."""
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_give_up_after_max_retries(self, mock_echo, mock_http):
+        """Target is skipped and a give-up message logged after MAX_TARGET_RETRIES failures."""
+        from kea_exporter.exporter import MAX_TARGET_RETRIES
+
+        mock_http.side_effect = OSError("Connection refused")
+        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
+
+        # Target should be a placeholder dict
+        self.assertIsInstance(exporter.targets[0], dict)
+
+        mock_echo.reset_mock()
+
+        # Exhaust all retries
+        for _ in range(MAX_TARGET_RETRIES):
+            exporter.update()
+
+        # Give-up message must have been logged (on the final retry)
+        logged_msgs = [call[0][0] for call in mock_echo.call_args_list]
+        self.assertTrue(
+            any("giving up" in msg.lower() for msg in logged_msgs),
+            f"Expected give-up message; got: {logged_msgs}",
+        )
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_no_init_attempt_after_max_retries(self, mock_echo, mock_http):
+        """After MAX_TARGET_RETRIES the client constructor is no longer called."""
+        from kea_exporter.exporter import MAX_TARGET_RETRIES
+
+        mock_http.side_effect = OSError("Connection refused")
+        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
+
+        # Exhaust all retries
+        for _ in range(MAX_TARGET_RETRIES):
+            exporter.update()
+
+        # Reset to detect any further calls
+        mock_http.reset_mock()
+        mock_echo.reset_mock()
+
+        exporter.update()
+
+        # No further attempt to create the client
+        mock_http.assert_not_called()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_successful_recovery_replaces_placeholder(self, mock_echo, mock_http):
+        """After an initial failure, a successful re-init replaces the placeholder and stats() is called."""
+        mock_client = Mock()
+        mock_client.stats.return_value = iter([])
+        # First call (during __init__) raises; second call (during update) succeeds
+        mock_http.side_effect = [OSError("initial failure"), mock_client]
+
+        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
+
+        # Target should be a placeholder dict after init failure
+        self.assertIsInstance(exporter.targets[0], dict)
+
+        # Next update() triggers _try_init_target which now succeeds
+        exporter.update()
+
+        # Placeholder should have been replaced with the real client
+        self.assertIs(exporter.targets[0], mock_client)
+
+        # stats() should have been called on the recovered client
+        mock_client.stats.assert_called_once()
+
+
+class TestGaugeRemoveExceptionHandling(unittest.TestCase):
+    """Test narrowed exception handling in gauge.remove() during stale-label pruning."""
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def test_keyerror_from_gauge_remove_is_silenced(self, mock_http):
+        """KeyError raised by gauge.remove() is silently ignored."""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+        exporter.targets = []  # No live targets; only stale-label pruning runs
+
+        mock_gauge = Mock()
+        mock_gauge._labelnames = []  # No "server" label → server_idx is None → remove is always called
+        mock_gauge.remove.side_effect = KeyError("label not found")
+
+        exporter._seen_labels_previous = {id(mock_gauge): (mock_gauge, {()})}
+
+        # Must not raise
+        exporter.update()
+        mock_gauge.remove.assert_called_once_with()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    @patch("click.echo")
+    def test_unexpected_exception_from_gauge_remove_is_logged(self, mock_echo, mock_http):
+        """A non-KeyError from gauge.remove() is logged to stderr."""
+        mock_http.return_value = Mock()
+        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+        exporter.targets = []
+
+        mock_gauge = Mock()
+        mock_gauge._labelnames = []  # no "server" label → server_idx=None → remove() called without server key lookup
+        mock_gauge.remove.side_effect = ValueError("something went wrong")
+
+        exporter._seen_labels_previous = {id(mock_gauge): (mock_gauge, {()})}
+
+        # Must not raise
+        exporter.update()
+
+        # An error message must have been logged (with err=True)
+        err_msgs = [call[0][0] for call in mock_echo.call_args_list if call[1].get("err")]
+        self.assertTrue(
+            any("Unexpected error removing gauge label" in m for m in err_msgs),
+            f"Expected error log; got err= calls: {err_msgs}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

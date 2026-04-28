@@ -1,3 +1,4 @@
+import signal
 import sys
 import time
 from typing import Any
@@ -67,6 +68,30 @@ class Timer:
     default=10,
     help="Timeout for HTTP requests in seconds.",
 )
+@click.option(
+    "--stale-timeout",
+    envvar="STALE_TIMEOUT",
+    type=click.IntRange(min=0),
+    default=0,
+    help=(
+        "Remove metrics for a server that has not responded for this many seconds. 0 disables the timeout (default)."
+    ),
+)
+@click.option(
+    "--no-tls-verify",
+    "tls_no_verify",
+    envvar="TLS_NO_VERIFY",
+    is_flag=True,
+    default=False,
+    help="Disable TLS certificate verification for HTTPS targets (insecure).",
+)
+@click.option(
+    "--ca-bundle",
+    envvar="CA_BUNDLE",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to a CA bundle file for TLS certificate verification.",
+)
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
 @click.version_option(prog_name=__project__, version=__version__)
 def cli(port, address, interval, **kwargs: Any):
@@ -87,7 +112,8 @@ def cli(port, address, interval, **kwargs: Any):
         interval (int): Minimum number of seconds between consecutive
             exporter updates.
         **kwargs: Passed through to Exporter constructor (for example:
-            targets, client_cert, client_key, timeout).
+            targets, client_cert, client_key, timeout, tls_no_verify,
+            ca_bundle).
     """
     exporter = Exporter(**kwargs)
 
@@ -118,11 +144,15 @@ def cli(port, address, interval, **kwargs: Any):
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        click.echo("Received signal, shutting down.", err=True)
+        old_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             httpd.shutdown()
             httpd.server_close()
         except Exception as e:
             click.echo(f"Error during shutdown: {e}", err=True)
+        finally:
+            signal.signal(signal.SIGINT, old_handler)
         sys.exit(0)
 
 

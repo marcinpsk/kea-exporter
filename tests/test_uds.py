@@ -4,6 +4,7 @@ Tests for kea_exporter.uds module
 
 import json
 import os
+import socket
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -86,10 +87,7 @@ class TestKeaSocketClientQuery(unittest.TestCase):
         mock_sock = MagicMock()
         mock_socket_class.return_value.__enter__.return_value = mock_sock
 
-        # Mock makefile to return JSON response
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps({"result": 0, "arguments": {"test": "data"}})
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps({"result": 0, "arguments": {"test": "data"}}).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
         result = client.query("test-command")
@@ -99,10 +97,10 @@ class TestKeaSocketClientQuery(unittest.TestCase):
 
         # Verify socket operations
         mock_sock.connect.assert_called_once_with("/path/to/socket")
-        mock_sock.send.assert_called_once()
+        mock_sock.sendall.assert_called_once()
 
         # Verify command format
-        sent_data = mock_sock.send.call_args[0][0]
+        sent_data = mock_sock.sendall.call_args[0][0]
         sent_command = json.loads(sent_data.decode("utf-8"))
         self.assertEqual(sent_command["command"], "test-command")
 
@@ -117,9 +115,7 @@ class TestKeaSocketClientQuery(unittest.TestCase):
         mock_sock = MagicMock()
         mock_socket_class.return_value.__enter__.return_value = mock_sock
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps({"result": 1, "text": "Error message"})
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps({"result": 1, "text": "Error message"}).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
 
@@ -138,9 +134,7 @@ class TestKeaSocketClientQuery(unittest.TestCase):
         mock_sock = MagicMock()
         mock_socket_class.return_value.__enter__.return_value = mock_sock
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps({"result": 0, "arguments": {}})
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps({"result": 0, "arguments": {}}).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
         client.query("test-command")
@@ -158,9 +152,7 @@ class TestKeaSocketClientQuery(unittest.TestCase):
         mock_sock = MagicMock()
         mock_socket_class.return_value.__enter__.return_value = mock_sock
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps({"result": 2})
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps({"result": 2}).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
 
@@ -168,6 +160,55 @@ class TestKeaSocketClientQuery(unittest.TestCase):
             client.query("bad-command")
         self.assertIn("bad-command", str(ctx.exception))
         self.assertIn("result 2", str(ctx.exception))
+
+    @patch("socket.socket")
+    @patch("os.access")
+    @patch("os.path.abspath")
+    def test_query_timeout_on_partial_response(self, mock_abspath, mock_access, mock_socket_class):
+        """query() raises socket.timeout if recv() times out mid-response."""
+        mock_access.return_value = True
+        mock_abspath.return_value = "/path/to/socket"
+        mock_sock = MagicMock()
+        mock_socket_class.return_value.__enter__.return_value = mock_sock
+        # First recv returns partial data, second recv raises timeout
+        mock_sock.recv.side_effect = [
+            b'{"result": 0, "arg',
+            socket.timeout("timed out"),
+        ]
+        client = KeaSocketClient("/path/to/socket")
+        with self.assertRaises(socket.timeout):
+            client.query("statistic-get-all")
+
+    @patch("socket.socket")
+    @patch("os.access")
+    @patch("os.path.abspath")
+    def test_query_multi_chunk_response(self, mock_abspath, mock_access, mock_socket_class):
+        """query() correctly reassembles a response split across multiple recv() chunks."""
+        mock_access.return_value = True
+        mock_abspath.return_value = "/path/to/socket"
+        mock_sock = MagicMock()
+        mock_socket_class.return_value.__enter__.return_value = mock_sock
+        part1 = b'{"result": 0, "argu'
+        part2 = b'ments": {"Dhcp4": {}}}'
+        mock_sock.recv.side_effect = [part1, part2, b""]
+        client = KeaSocketClient("/path/to/socket")
+        result = client.query("config-get")
+        self.assertEqual(result["result"], 0)
+        self.assertEqual(result["arguments"], {"Dhcp4": {}})
+
+    @patch("socket.socket")
+    @patch("os.access")
+    @patch("os.path.abspath")
+    def test_query_socket_error_propagates(self, mock_abspath, mock_access, mock_socket_class):
+        """query() lets socket.error propagate when recv() fails mid-response."""
+        mock_access.return_value = True
+        mock_abspath.return_value = "/path/to/socket"
+        mock_sock = MagicMock()
+        mock_socket_class.return_value.__enter__.return_value = mock_sock
+        mock_sock.recv.side_effect = [b"partial", socket.error("connection reset")]
+        client = KeaSocketClient("/path/to/socket")
+        with self.assertRaises(socket.error):
+            client.query("statistic-get-all")
 
 
 class TestKeaSocketClientReload(unittest.TestCase):
@@ -191,9 +232,7 @@ class TestKeaSocketClientReload(unittest.TestCase):
             },
         }
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps(config_data)
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
         client.reload()
@@ -217,9 +256,7 @@ class TestKeaSocketClientReload(unittest.TestCase):
 
         config_data = {"result": 0, "arguments": {"Dhcp6": {"subnet6": [{"id": 10, "subnet": "2001:db8::/64"}]}}}
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps(config_data)
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
         client.reload()
@@ -241,9 +278,7 @@ class TestKeaSocketClientReload(unittest.TestCase):
 
         config_data = {"result": 0, "arguments": {"UnknownService": {}}}
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps(config_data)
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
 
@@ -272,9 +307,12 @@ class TestKeaSocketClientStats(unittest.TestCase):
             "arguments": {"pkt4-received": [[100, "2024-01-01"]], "pkt4-ack-sent": [[50, "2024-01-01"]]},
         }
 
-        mock_file = MagicMock()
-        mock_file.read.side_effect = [json.dumps(config_data), json.dumps(stats_data)]
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [
+            json.dumps(config_data).encode(),
+            b"",
+            json.dumps(stats_data).encode(),
+            b"",
+        ]
 
         client = KeaSocketClient("/path/to/socket")
         results = list(client.stats())
@@ -302,9 +340,12 @@ class TestKeaSocketClientStats(unittest.TestCase):
 
         stats_data = {"result": 0, "arguments": {"pkt6-received": [[200, "2024-01-01"]]}}
 
-        mock_file = MagicMock()
-        mock_file.read.side_effect = [json.dumps(config_data), json.dumps(stats_data)]
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [
+            json.dumps(config_data).encode(),
+            b"",
+            json.dumps(stats_data).encode(),
+            b"",
+        ]
 
         client = KeaSocketClient("/path/to/socket")
         results = list(client.stats())
@@ -329,15 +370,18 @@ class TestKeaSocketClientStats(unittest.TestCase):
 
         stats_data = {"result": 0, "arguments": {}}
 
-        mock_file = MagicMock()
-        mock_file.read.side_effect = [json.dumps(config_data), json.dumps(stats_data)]  # First reload  # Stats query
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [
+            json.dumps(config_data).encode(),
+            b"",
+            json.dumps(stats_data).encode(),
+            b"",
+        ]
 
         client = KeaSocketClient("/path/to/socket")
         list(client.stats())
 
         # Should have made two queries: config-get and statistic-get-all
-        self.assertEqual(mock_sock.send.call_count, 2)
+        self.assertEqual(mock_sock.sendall.call_count, 2)
 
     @patch("socket.socket")
     @patch("os.access")
@@ -355,9 +399,12 @@ class TestKeaSocketClientStats(unittest.TestCase):
 
         stats_data = {"result": 0, "arguments": {}}
 
-        mock_file = MagicMock()
-        mock_file.read.side_effect = [json.dumps(config_data), json.dumps(stats_data)]
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [
+            json.dumps(config_data).encode(),
+            b"",
+            json.dumps(stats_data).encode(),
+            b"",
+        ]
 
         client = KeaSocketClient(socket_path)
         results = list(client.stats())
@@ -382,9 +429,7 @@ class TestKeaSocketClientEdgeCases(unittest.TestCase):
 
         config_data = {"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps(config_data)
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
         client.reload()
@@ -415,9 +460,7 @@ class TestKeaSocketClientEdgeCases(unittest.TestCase):
             },
         }
 
-        mock_file = MagicMock()
-        mock_file.read.return_value = json.dumps(config_data)
-        mock_sock.makefile.return_value = mock_file
+        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
 
         client = KeaSocketClient("/path/to/socket")
         client.reload()
