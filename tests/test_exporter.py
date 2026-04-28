@@ -842,9 +842,7 @@ class TestStalePoolCleanup(unittest.TestCase):
         ]
         mock_http.return_value = mock_client
 
-        exporter = Exporter(
-            targets=["http://kea-dhcp4:53100"], stale_timeout=60, registry=self.registry
-        )
+        exporter = Exporter(targets=["http://kea-dhcp4:53100"], stale_timeout=60, registry=self.registry)
 
         with patch("kea_exporter.exporter.time.monotonic", return_value=0.0):
             exporter.update()
@@ -881,9 +879,7 @@ class TestStalePoolCleanup(unittest.TestCase):
         ]
         mock_http.return_value = mock_client
 
-        exporter = Exporter(
-            targets=["http://kea-dhcp4:53100"], stale_timeout=0, registry=self.registry
-        )
+        exporter = Exporter(targets=["http://kea-dhcp4:53100"], stale_timeout=0, registry=self.registry)
 
         with patch("kea_exporter.exporter.time.monotonic", return_value=0.0):
             exporter.update()
@@ -901,9 +897,7 @@ class TestStalePoolCleanup(unittest.TestCase):
     def test_stale_timeout_zero_is_default(self):
         """Exporter.stale_timeout defaults to 0 when not specified."""
         with patch("kea_exporter.exporter.KeaHTTPClient"):
-            exporter = Exporter(
-                targets=["http://kea-dhcp4:53100"], registry=self.registry
-            )
+            exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
         self.assertEqual(exporter.stale_timeout, 0)
 
 

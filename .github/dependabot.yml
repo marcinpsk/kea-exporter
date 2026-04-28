@@ -17,7 +17,7 @@ updates:
       docker:
         patterns:
           - "*"
-  
+
   - package-ecosystem: "uv"
     directory: "/"
     schedule:

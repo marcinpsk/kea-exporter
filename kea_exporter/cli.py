@@ -73,8 +73,7 @@ class Timer:
     type=click.IntRange(min=0),
     default=0,
     help=(
-        "Remove metrics for a server that has not responded for this many seconds. "
-        "0 disables the timeout (default)."
+        "Remove metrics for a server that has not responded for this many seconds. 0 disables the timeout (default)."
     ),
 )
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
