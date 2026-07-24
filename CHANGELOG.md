@@ -1,5 +1,17 @@
 
 
+0.9.1
+
+
+
+ - handle Kea 3.2 global-scope stats without aborting the scrape
+
+
+
+
+
+
+
 0.9.0
 
 
