@@ -402,6 +402,31 @@ class Exporter:
                 "metric": "received_packets",
                 "labels": {"operation": "drop"},
             },
+            # new global packet counters in Kea 3.2
+            "pkt4-lease-query-received": {
+                "metric": "received_packets",
+                "labels": {"operation": "lease-query"},
+            },
+            "pkt4-lease-query-response-active-sent": {
+                "metric": "sent_packets",
+                "labels": {"operation": "lease-query-response-active"},
+            },
+            "pkt4-lease-query-response-unassigned-sent": {
+                "metric": "sent_packets",
+                "labels": {"operation": "lease-query-response-unassigned"},
+            },
+            "pkt4-lease-query-response-unknown-sent": {
+                "metric": "sent_packets",
+                "labels": {"operation": "lease-query-response-unknown"},
+            },
+            "pkt4-admin-filtered": {"metric": "received_packets", "labels": {"operation": "admin-filtered"}},
+            "pkt4-duplicate": {"metric": "received_packets", "labels": {"operation": "duplicate"}},
+            "pkt4-limit-exceeded": {"metric": "received_packets", "labels": {"operation": "limit-exceeded"}},
+            "pkt4-not-for-us": {"metric": "received_packets", "labels": {"operation": "not-for-us"}},
+            "pkt4-processing-failed": {"metric": "received_packets", "labels": {"operation": "processing-failed"}},
+            "pkt4-queue-full": {"metric": "received_packets", "labels": {"operation": "queue-full"}},
+            "pkt4-rfc-violation": {"metric": "received_packets", "labels": {"operation": "rfc-violation"}},
+            "pkt4-service-disabled": {"metric": "received_packets", "labels": {"operation": "service-disabled"}},
             # per Subnet or pool
             "v4-allocation-fail-subnet": {
                 "metric": "addresses_allocation_fail",
@@ -445,6 +470,9 @@ class Exporter:
         self.metrics_dhcp4_global_ignore = [
             # metrics that exist at the subnet level in more detail
             "cumulative-assigned-addresses",
+            # global aggregate of subnet[N].assigned-addresses; routing it to the
+            # subnet-scoped addresses_assigned_total gauge would mismatch labels.
+            "assigned-addresses",
             "declined-addresses",
             # sums of different packet types
             "reclaimed-declined-addresses",
@@ -603,6 +631,17 @@ class Exporter:
             # received_packets
             "pkt6-receive-drop": {"metric": "received_packets", "labels": {"operation": "drop"}},
             "pkt6-parse-failed": {"metric": "received_packets", "labels": {"operation": "parse-failed"}},
+            # new global packet counters in Kea 3.2
+            "pkt6-lease-query-received": {"metric": "received_packets", "labels": {"operation": "lease-query"}},
+            "pkt6-lease-query-reply-sent": {"metric": "sent_packets", "labels": {"operation": "lease-query-reply"}},
+            "pkt6-admin-filtered": {"metric": "received_packets", "labels": {"operation": "admin-filtered"}},
+            "pkt6-duplicate": {"metric": "received_packets", "labels": {"operation": "duplicate"}},
+            "pkt6-limit-exceeded": {"metric": "received_packets", "labels": {"operation": "limit-exceeded"}},
+            "pkt6-not-for-us": {"metric": "received_packets", "labels": {"operation": "not-for-us"}},
+            "pkt6-processing-failed": {"metric": "received_packets", "labels": {"operation": "processing-failed"}},
+            "pkt6-queue-full": {"metric": "received_packets", "labels": {"operation": "queue-full"}},
+            "pkt6-rfc-violation": {"metric": "received_packets", "labels": {"operation": "rfc-violation"}},
+            "pkt6-service-disabled": {"metric": "received_packets", "labels": {"operation": "service-disabled"}},
             "pkt6-solicit-received": {"metric": "received_packets", "labels": {"operation": "solicit"}},
             "pkt6-advertise-received": {"metric": "received_packets", "labels": {"operation": "advertise"}},
             "pkt6-request-received": {"metric": "received_packets", "labels": {"operation": "request"}},
@@ -651,9 +690,13 @@ class Exporter:
             # metrics that exist at the subnet level in more detail
             "cumulative-assigned-addresses",
             "declined-addresses",
-            # sums of different packet types
+            # global aggregates of subnet[N].assigned-nas / assigned-pds; routing
+            # them to the subnet-scoped na_assigned_total / pd_assigned_total gauges
+            # would mismatch labels.
             "cumulative-assigned-nas",
+            "assigned-nas",
             "cumulative-assigned-pds",
+            "assigned-pds",
             # Address Registration cumulative totals (subnet-level detail is sufficient)
             "cumulative-registered-nas",
             "reclaimed-declined-addresses",
@@ -848,10 +891,20 @@ class Exporter:
         return True
 
     def _set_metric(self, metric, labels, value):
-        """Filter labels to those configured on the metric and set the value."""
+        """Filter labels to those configured on the metric and set the value.
+
+        Returns ``True`` when the value was set, ``False`` when *labels* does not
+        supply every label the gauge declares. The latter happens when a statistic
+        is reported at a scope that lacks the gauge's labels — e.g. a global-scope
+        aggregate (only ``server``) routed to a subnet-scoped gauge. Skipping such a
+        value avoids ``prometheus_client`` raising ``ValueError('Incorrect label
+        names')``, which would otherwise abort the entire scrape for the target.
+        """
         # _labelnames is a private attribute of prometheus_client.Gauge but
         # there is no public accessor; access is centralised here.
         filtered = {k: v for k, v in labels.items() if k in metric._labelnames}
+        if set(filtered) != set(metric._labelnames):
+            return False
         metric.labels(**filtered).set(value)
         # Record this label combination so stale entries can be pruned later.
         gauge_id = id(metric)
@@ -859,6 +912,7 @@ class Exporter:
             self._seen_labels_current[gauge_id] = (metric, set())
         label_tuple = tuple(str(filtered.get(k, "")) for k in metric._labelnames)
         self._seen_labels_current[gauge_id][1].add(label_tuple)
+        return True
 
     def _report_unhandled(self, key, message):
         """Report an unhandled metric key once."""
@@ -917,4 +971,11 @@ class Exporter:
 
             metric = metrics[metric_info["metric"]]
             labels.update(metric_info.get("labels", {}))
-            self._set_metric(metric, labels, value)
+            if not self._set_metric(metric, labels, value):
+                self._report_unhandled(
+                    key,
+                    f"Skipping metric '{key}': reported at a scope that does not "
+                    f"supply all labels of gauge '{metric_info['metric']}' "
+                    f"({list(metric._labelnames)}); please file an issue at "
+                    "https://github.com/marcinpsk/kea-exporter",
+                )
