@@ -1226,5 +1226,113 @@ class TestGaugeRemoveExceptionHandling(unittest.TestCase):
         )
 
 
+class TestExporterKea32Statistics(unittest.TestCase):
+    """Kea 3.2 expanded the statistics set; the exporter must stay resilient.
+
+    - A global-scope aggregate (e.g. ``assigned-addresses``) that maps to a
+      subnet-scoped gauge must not abort the whole scrape with
+      ``ValueError('Incorrect label names')``.
+    - The new 3.2 packet counters must be exported.
+    """
+
+    def setUp(self):
+        self.registry = CollectorRegistry()
+
+    @patch("kea_exporter.exporter.KeaHTTPClient")
+    def _make_exporter(self, mock_http):
+        mock_http.return_value = Mock()
+        return Exporter(targets=["http://localhost:8000"], registry=self.registry)
+
+    def test_global_assigned_addresses_does_not_abort_scrape_dhcp4(self):
+        """A global assigned-addresses must not crash dhcp4 parsing; later stats still export."""
+        exporter = self._make_exporter()
+        server = "http://localhost:8000"
+        arguments = {
+            # global aggregate that maps to the subnet-scoped addresses_assigned_total
+            # gauge — previously raised ValueError('Incorrect label names').
+            "assigned-addresses": [[123, "2024-01-01 00:00:00"]],
+            # a normal stat that must still be exported afterwards
+            "pkt4-discover-received": [[7, "2024-01-01 00:00:00"]],
+        }
+        exporter.parse_metrics(server, DHCPVersion.DHCP4, arguments, subnets={})  # must not raise
+        self.assertEqual(
+            self.registry.get_sample_value(
+                "kea_dhcp4_packets_received_total", {"server": server, "operation": "discover"}
+            ),
+            7,
+        )
+        # The redundant global aggregate was skipped, not exported to the subnet gauge.
+        self.assertIsNone(
+            self.registry.get_sample_value(
+                "kea_dhcp4_addresses_assigned_total",
+                {"server": server, "subnet": "", "subnet_id": "", "pool": ""},
+            )
+        )
+
+    def test_global_assigned_nas_and_pds_do_not_abort_scrape_dhcp6(self):
+        """Global assigned-nas / assigned-pds must not crash dhcp6 parsing."""
+        exporter = self._make_exporter()
+        server = "http://localhost:8000"
+        arguments = {
+            "assigned-nas": [[10, "t"]],
+            "assigned-pds": [[5, "t"]],
+            "pkt6-solicit-received": [[3, "t"]],
+        }
+        exporter.parse_metrics(server, DHCPVersion.DHCP6, arguments, subnets={})  # must not raise
+        self.assertEqual(
+            self.registry.get_sample_value(
+                "kea_dhcp6_packets_received_total", {"server": server, "operation": "solicit"}
+            ),
+            3,
+        )
+
+    def test_set_metric_skips_scope_mismatch_instead_of_raising(self):
+        """_set_metric returns False (no raise) when labels don't cover the gauge's labelnames."""
+        exporter = self._make_exporter()
+        gauge = exporter.metrics_dhcp4["addresses_assigned_total"]  # [server, subnet, subnet_id, pool]
+        # global scope: only 'server' provided → skip, no raise
+        self.assertFalse(exporter._set_metric(gauge, {"server": "s"}, 1))
+        # full label set → value is set
+        self.assertTrue(
+            exporter._set_metric(gauge, {"server": "s", "subnet": "10.0.0.0/24", "subnet_id": 1, "pool": ""}, 1)
+        )
+
+    def test_new_pkt4_counters_exported(self):
+        """The new Kea 3.2 pkt4-* counters map to packets_received/sent_total."""
+        exporter = self._make_exporter()
+        server = "http://localhost:8000"
+        arguments = {
+            "pkt4-lease-query-received": [[1, "t"]],
+            "pkt4-lease-query-response-active-sent": [[2, "t"]],
+            "pkt4-duplicate": [[3, "t"]],
+            "pkt4-service-disabled": [[4, "t"]],
+        }
+        exporter.parse_metrics(server, DHCPVersion.DHCP4, arguments, subnets={})
+        gsv = self.registry.get_sample_value
+        self.assertEqual(gsv("kea_dhcp4_packets_received_total", {"server": server, "operation": "lease-query"}), 1)
+        self.assertEqual(
+            gsv("kea_dhcp4_packets_sent_total", {"server": server, "operation": "lease-query-response-active"}), 2
+        )
+        self.assertEqual(gsv("kea_dhcp4_packets_received_total", {"server": server, "operation": "duplicate"}), 3)
+        self.assertEqual(
+            gsv("kea_dhcp4_packets_received_total", {"server": server, "operation": "service-disabled"}), 4
+        )
+
+    def test_new_pkt6_counters_exported(self):
+        """The new Kea 3.2 pkt6-* counters map to packets_received/sent_total."""
+        exporter = self._make_exporter()
+        server = "http://localhost:8000"
+        arguments = {
+            "pkt6-lease-query-received": [[1, "t"]],
+            "pkt6-lease-query-reply-sent": [[2, "t"]],
+            "pkt6-queue-full": [[5, "t"]],
+        }
+        exporter.parse_metrics(server, DHCPVersion.DHCP6, arguments, subnets={})
+        gsv = self.registry.get_sample_value
+        self.assertEqual(gsv("kea_dhcp6_packets_received_total", {"server": server, "operation": "lease-query"}), 1)
+        self.assertEqual(gsv("kea_dhcp6_packets_sent_total", {"server": server, "operation": "lease-query-reply"}), 2)
+        self.assertEqual(gsv("kea_dhcp6_packets_received_total", {"server": server, "operation": "queue-full"}), 5)
+
+
 if __name__ == "__main__":
     unittest.main()
