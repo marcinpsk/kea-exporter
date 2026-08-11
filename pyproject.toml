@@ -85,6 +85,8 @@ dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "zizmor==1.29.0",
+    # tomllib is stdlib from 3.11; CI runs 3.10, where the release-config test needs this.
+    "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [tool.pytest.ini_options]
@@ -127,21 +129,24 @@ prerelease_token = "rc"
 prerelease = false
 
 [tool.semantic_release.changelog]
-# Recommended patterns for conventional commits parser that is scope aware
+# Release notes carry the types a user of the exporter acts on: feat, fix and
+# perf. Everything else in allowed_tags is excluded here. This governs both
+# CHANGELOG.md and the GitHub release, which renders from its own template.
 exclude_commit_patterns = [
+    '''build(?:\([^)]*?\))?: .+''',
     '''chore(?:\([^)]*?\))?: .+''',
     '''ci(?:\([^)]*?\))?: .+''',
+    '''docs(?:\([^)]*?\))?: .+''',
     '''refactor(?:\([^)]*?\))?: .+''',
     '''style(?:\([^)]*?\))?: .+''',
     '''test(?:\([^)]*?\))?: .+''',
-    '''build\((?!deps\): .+)''',
     '''Initial [Cc]ommit.*''',
 ]
 mode = "init"
-
-[tool.semantic_release.changelog.default_templates]
-changelog_file = "HISTORY"
-template = "templates/CHANGELOG.md.j2"
+# Renders templates/CHANGELOG.md.j2. default_templates has no "template" key,
+# and semantic-release ignores keys it does not know, so naming it there read
+# as configuration while changing nothing.
+template_dir = "templates"
 
 [tool.semantic_release.changelog.environment]
 block_start_string = "{%"

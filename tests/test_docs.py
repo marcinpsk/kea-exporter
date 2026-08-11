@@ -11,9 +11,13 @@ from pathlib import Path
 
 import pytest
 
+from kea_exporter import catalogue
+
 ROOT = Path(__file__).resolve().parent.parent
 AGENT_DOCS = sorted((ROOT / "docs" / "agents").glob("*.md")) + [ROOT / "AGENTS.md"]
 ISSUE_TRACKER = ROOT / "docs" / "agents" / "issue-tracker.md"
+ADR_SCOPE = ROOT / "docs" / "adr" / "0001-scope-drives-metric-labels.md"
+CONTEXT = ROOT / "CONTEXT.md"
 
 # gh subcommands whose --json field list can be checked without network access.
 GH_JSON_COMMAND = re.compile(r"gh (issue|pr) (list|view|status)\b[^`\n]*?--json ([a-zA-Z][a-zA-Z,]*)")
@@ -64,6 +68,53 @@ def test_documented_gh_json_fields_exist(path):
 
         unknown = sorted(set(fields.split(",")) - available)
         assert not unknown, f"{path.relative_to(ROOT)} documents `gh {noun} {verb} --json` fields gh rejects: {unknown}"
+
+
+def test_no_glossary_definition_uses_a_word_it_tells_you_to_avoid():
+    """A definition written in the synonyms it rejects teaches the wrong word."""
+    entries = []
+    for block in CONTEXT.read_text().split("\n\n"):
+        heading = re.match(r"\*\*(?P<term>[^*]+)\*\*:\n(?P<body>.*)", block, re.DOTALL)
+        if not heading:
+            continue
+        avoid = re.search(r"^_Avoid_: (.+)$", heading.group("body"), re.MULTILINE)
+        if avoid:
+            entries.append((heading.group("term"), heading.group("body")[: avoid.start()], avoid.group(1)))
+
+    assert entries, "no glossary entries with an _Avoid_ list were found; the format changed"
+
+    offences = []
+    for term, definition, avoid in entries:
+        for word in (w.strip() for w in avoid.split(",")):
+            # `s?` so a plural of an avoided word counts as using it.
+            if re.search(rf"\b{re.escape(word)}s?\b", definition, re.IGNORECASE):
+                offences.append(f"{term}: definition uses {word!r}")
+
+    assert not offences, "CONTEXT.md definitions use terms they tell you to avoid: " + "; ".join(offences)
+
+
+def test_adr_0001_states_the_scope_contract_the_exporter_implements():
+    """The ADR records why scope drives labels, so it has to match the exporter.
+
+    A reading resolves by an exact (statistic, scope) lookup, and a routine
+    global aggregate is suppressed without a report. An ADR that drops either
+    half describes a different exporter than the one that ships.
+    """
+    multi = [e for version in catalogue.CATALOGUE for e in catalogue.CATALOGUE[version] if len(e.scopes) > 1]
+    assert multi, "no entry declares several scopes any more; this guard needs rewriting"
+
+    text = ADR_SCOPE.read_text()
+    required = {
+        "every scope at which the exporter exports": (
+            "the rule is the scopes the exporter exports, not the scopes Kea reports: "
+            f"{len(multi)} entries declare several, such as {multi[0].statistic!r}, while Kea "
+            "also reports aggregates the exporter suppresses"
+        ),
+        "exact `(statistic, scope)` lookup": "the ADR must say why one scope per entry cannot work",
+        "suppressed without a report": "the ADR must keep the exception for routine global aggregates",
+    }
+    for phrase, reason in required.items():
+        assert phrase in text, f"docs/adr/0001 no longer states {phrase!r}: {reason}"
 
 
 def test_external_pr_filter_excludes_insiders_rather_than_listing_outsiders():

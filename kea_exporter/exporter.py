@@ -6,77 +6,67 @@ from urllib.parse import urlparse
 import click
 from prometheus_client import Gauge
 
-from kea_exporter import DHCPVersion
+from kea_exporter import DHCPVersion, catalogue
+from kea_exporter.catalogue import Scope
 from kea_exporter.http import KeaHTTPClient
 from kea_exporter.uds import KeaSocketClient
 
 MAX_TARGET_RETRIES = 10
 
+ISSUE_URL = "https://github.com/marcinpsk/kea-exporter"
+
 
 class Exporter:
+    # subnet[1].assigned-addresses, subnet[1].pool[0].assigned-addresses,
+    # subnet[1].pd-pool[0].assigned-pds
     subnet_pattern = re.compile(
-        r"^subnet\[(?P<subnet_id>[\d]+)\]\."
-        r"(pool\[(?P<pool_index>[\d]+)\]\.(?P<pool_metric>[\w-]+)"
-        r"|(?P<subnet_metric>[\w-]+))$"
+        r"^subnet\[(?P<subnet_id>\d+)\]\."
+        r"(?:(?P<pool_kind>pd-pool|pool)\[(?P<pool_index>\d+)\]\.)?"
+        r"(?P<statistic>[\w-]+)$"
     )
+    # key[example.com.].update-sent
+    ddns_key_pattern = re.compile(r"^key\[(?P<key>[^\]]+)\]\.(?P<statistic>.+)$")
 
     def __init__(self, targets, stale_timeout: int = 0, registry=None, **kwargs) -> None:
-        # prometheus
         """
-        Initialize the Exporter: configure metric prefixes and metric
-        containers, prepare DDNS/DHCP4/DHCP6 gauges and mappings,
-        initialize tracking state for unhandled metrics and missing subnet
-        info, and create client objects for each target.
+        Initialize the Exporter: build the Prometheus metrics declared by the
+        catalogue, prepare tracking state, and create a client for each target.
 
         Parameters:
-            targets (Iterable[str]): Iterable of target addresses. Each
-                target is parsed as a URL; if it has a URL scheme a
-                KeaHTTPClient is created, otherwise if it has a path a
-                KeaSocketClient is created. Targets that cannot be parsed or
-                that raise OSError during client creation are skipped and not
-                added to self.targets.
-            registry (CollectorRegistry): Prometheus registry to register
-                metrics with. Defaults to the global REGISTRY.
-            **kwargs: Additional keyword arguments forwarded to
-                KeaHTTPClient or KeaSocketClient when creating clients.
+            targets (Iterable[str]): Iterable of target addresses. Each target
+                is parsed as a URL; if it has a URL scheme a KeaHTTPClient is
+                created, otherwise if it has a path a KeaSocketClient is
+                created. Targets that cannot be parsed are skipped; targets
+                that raise during client creation keep a placeholder so
+                update() can retry them.
+            stale_timeout (int): Remove labels for a server silent longer than
+                this many seconds. 0 disables the timeout.
+            registry (CollectorRegistry): Registry to register metrics with.
+                Defaults to the global REGISTRY.
+            **kwargs: Forwarded to KeaHTTPClient or KeaSocketClient.
         """
         from prometheus_client import REGISTRY
 
         self.registry = registry or REGISTRY
-        self.prefix = "kea"
-        self.prefix_dhcp4 = f"{self.prefix}_dhcp4"
-        self.prefix_dhcp6 = f"{self.prefix}_dhcp6"
-        self.prefix_ddns = f"{self.prefix}_ddns"
 
-        self.metrics_dhcp4 = None
-        self.metrics_dhcp4_map = None
-        self.metrics_dhcp4_global_ignore = None
-        self.metrics_dhcp4_subnet_ignore = None
-        self.setup_dhcp4_metrics()
+        # metrics[version][metric_name] -> Gauge, built from the catalogue.
+        self.metrics = {version: self._build_metrics(version) for version in catalogue.CATALOGUE}
+        # index[version][(statistic, scope)] -> Entry
+        self.index = {version: catalogue.index(version) for version in catalogue.CATALOGUE}
+        # Statistics known at some scope, for telling a mis-scoped reading from
+        # an unknown one.
+        self.known = {
+            version: {entry.statistic for entry in entries} for version, entries in catalogue.CATALOGUE.items()
+        }
 
-        self.metrics_dhcp6 = None
-        self.metrics_dhcp6_map = None
-        self.metrics_dhcp6_global_ignore = None
-        self.metrics_dhcp6_subnet_ignore = None
-        self.setup_dhcp6_metrics()
-
-        self.metrics_ddns = None
-        self.metrics_ddns_map = None
-        self.ddns_key_pattern = None
-        self.setup_ddns_metrics()
-
-        # Maps id(gauge) -> DHCPVersion so the pruning loop can determine
-        # which DHCP version a gauge belongs to without threading dhcp_version
-        # through _set_metric.
+        # Maps id(gauge) -> DHCPVersion so the pruning loop can determine which
+        # DHCP version a gauge belongs to without threading it through.
         self._gauge_to_dhcp_version: dict[int, DHCPVersion] = {}
-        for g in self.metrics_dhcp4.values():
-            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DHCP4
-        for g in self.metrics_dhcp6.values():
-            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DHCP6
-        for g in self.metrics_ddns.values():
-            self._gauge_to_dhcp_version[id(g)] = DHCPVersion.DDNS
+        for version, gauges in self.metrics.items():
+            for gauge in gauges.values():
+                self._gauge_to_dhcp_version[id(gauge)] = version
 
-        # track unhandled metric keys, to notify only once
+        # track unhandled statistics, to notify only once
         self.unhandled_metrics = set()
 
         # track missing info per (server_id, dhcp_version), to notify only once
@@ -105,17 +95,7 @@ class Exporter:
                     click.echo(f"Unable to parse target argument: {target}")
                     continue
             except Exception as ex:
-                # Log with the target URL stripped of credentials to avoid
-                # leaking secrets in output (requests errors can embed the
-                # original URL including embedded basic-auth credentials).
-                safe_target = target
-                parsed = urlparse(target)
-                if parsed.username:
-                    safe_host = parsed.hostname
-                    if parsed.port:
-                        safe_host = f"{safe_host}:{parsed.port}"
-                    safe_target = f"{parsed.scheme}://{safe_host}{parsed.path}"
-                click.echo(f"Failed to initialize target {safe_target}: {type(ex).__name__}: {ex}")
+                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}")
                 # Keep placeholder so update() can retry initialization
                 self.targets.append(
                     {"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs, "retry_count": 0}
@@ -123,6 +103,20 @@ class Exporter:
                 continue
 
             self.targets.append(client)
+
+    def _build_metrics(self, version: DHCPVersion) -> dict:
+        """Create one Gauge per metric the catalogue declares for this daemon."""
+        prefix = catalogue.METRIC_PREFIX[version]
+        documentation = catalogue.METRICS[version]
+        return {
+            metric: Gauge(
+                f"{prefix}_{metric}",
+                documentation[metric],
+                catalogue.labelnames(entries),
+                registry=self.registry,
+            )
+            for metric, entries in catalogue.entries_by_metric(version).items()
+        }
 
     def _try_init_target(self, i: int, target: dict):
         """Attempt to re-initialize a failed target placeholder.
@@ -148,18 +142,8 @@ class Exporter:
         except Exception as ex:
             target["retry_count"] = retry_count + 1
             if target["retry_count"] >= MAX_TARGET_RETRIES:
-                safe_id = raw
-                try:
-                    parsed = urlparse(raw)
-                    if parsed.username:
-                        safe_host = parsed.hostname
-                        if parsed.port:
-                            safe_host = f"{safe_host}:{parsed.port}"
-                        safe_id = f"{parsed.scheme}://{safe_host}{parsed.path}"
-                except Exception:
-                    pass  # non-URL paths (UDS socket paths) pass through unchanged
                 click.echo(
-                    f"Target {safe_id} failed to initialize after {MAX_TARGET_RETRIES} retries, giving up.",
+                    f"Target {_safe_target(raw)} failed to initialize after {MAX_TARGET_RETRIES} retries, giving up.",
                     err=True,
                 )
             target["last_error"] = str(ex)
@@ -167,17 +151,16 @@ class Exporter:
 
     def update(self):
         """
-        Fetch metrics from all configured targets and update the
-        exporter's Prometheus metrics.
+        Fetch statistics from all configured targets and update the metrics.
 
         Iterates each configured client, retrieves that client's reported
-        metric responses, and processes each response so the exporter's
-        metric gauges reflect the latest values. Uninitialized targets
-        (from failed client creation) are retried each update cycle.
-        After all targets are processed, label combinations that existed in
-        the previous cycle but not this one are removed from the registry —
-        but only for servers that successfully responded this cycle, to avoid
-        dropping valid metrics due to transient scrape failures.
+        statistics, and processes each response so the metrics reflect the
+        latest values. Uninitialized targets (from failed client creation) are
+        retried each update cycle. After all targets are processed, label
+        combinations that existed in the previous cycle but not this one are
+        removed from the registry, but only for servers that successfully
+        responded this cycle, to avoid dropping valid metrics due to transient
+        scrape failures.
         """
         self._seen_labels_current = {}
         successful_servers: set[tuple[str, DHCPVersion]] = set()
@@ -256,726 +239,153 @@ class Exporter:
 
         self._seen_labels_previous = next_seen_labels
 
-    def setup_dhcp4_metrics(self):
+    def _resolve_selector(self, key, server_id, dhcp_version, subnets):
+        """Split a statistic name into its scope, its bare name, and its labels.
+
+        Returns (scope, statistic, labels), or None when the statistic names a
+        subnet or pool that is no longer in the configuration.
         """
-        Initialize Prometheus Gauge objects, mapping rules, and ignore
-        lists for DHCPv4 metrics used by the exporter.
+        if dhcp_version is DHCPVersion.DDNS:
+            key_match = self.ddns_key_pattern.match(key)
+            if key_match:
+                return Scope.DDNS_KEY, key_match.group("statistic"), {"key": key_match.group("key")}
+            return Scope.GLOBAL, key, {}
 
-        Sets up the following attributes on self:
-        - metrics_dhcp4: dictionary of Gauge objects for DHCPv4 (packet
-          counters and per-subnet/pool metrics) with appropriate label
-          sets (including the new "server" label).
-        - metrics_dhcp4_map: mapping from KEA metric keys to internal
-          metric names and any static labels required to populate Gauge
-          labels.
-        - metrics_dhcp4_global_ignore: list of KEA metric keys to ignore
-          at the top (global) level.
-        - metrics_dhcp4_subnet_ignore: list of KEA metric keys to ignore
-          when processing subnet-level metrics.
-        """
-        self.metrics_dhcp4 = {
-            # Packets
-            "sent_packets": Gauge(
-                f"{self.prefix_dhcp4}_packets_sent_total",
-                "Packets sent",
-                ["server", "operation"],
-                registry=self.registry,
-            ),
-            "received_packets": Gauge(
-                f"{self.prefix_dhcp4}_packets_received_total",
-                "Packets received",
-                ["server", "operation"],
-                registry=self.registry,
-            ),
-            # per Subnet or Subnet pool
-            "addresses_allocation_fail": Gauge(
-                f"{self.prefix_dhcp4}_allocations_failed_total",
-                "Allocation fail count",
-                [
-                    "server",
-                    "subnet",
-                    "subnet_id",
-                    "context",
-                ],
-                registry=self.registry,
-            ),
-            "addresses_assigned_total": Gauge(
-                f"{self.prefix_dhcp4}_addresses_assigned_total",
-                "Assigned addresses",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "addresses_declined_total": Gauge(
-                f"{self.prefix_dhcp4}_addresses_declined_total",
-                "Declined counts",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "addresses_declined_reclaimed_total": Gauge(
-                f"{self.prefix_dhcp4}_addresses_declined_reclaimed_total",
-                "Declined addresses that were reclaimed",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "addresses_reclaimed_total": Gauge(
-                f"{self.prefix_dhcp4}_addresses_reclaimed_total",
-                "Expired addresses that were reclaimed",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "addresses_total": Gauge(
-                f"{self.prefix_dhcp4}_addresses_total",
-                "Size of subnet address pool",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "reservation_conflicts_total": Gauge(
-                f"{self.prefix_dhcp4}_reservation_conflicts_total",
-                "Reservation conflict count",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-            "leases_reused_total": Gauge(
-                f"{self.prefix_dhcp4}_leases_reused_total",
-                "Number of times an IPv4 lease has been renewed in memory",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-        }
+        subnet_match = self.subnet_pattern.match(key)
+        if not subnet_match:
+            return Scope.GLOBAL, key, {}
 
-        self.metrics_dhcp4_map = {
-            # sent_packets
-            "pkt4-ack-sent": {
-                "metric": "sent_packets",
-                "labels": {"operation": "ack"},
-            },
-            "pkt4-nak-sent": {
-                "metric": "sent_packets",
-                "labels": {"operation": "nak"},
-            },
-            "pkt4-offer-sent": {
-                "metric": "sent_packets",
-                "labels": {"operation": "offer"},
-            },
-            # received_packets
-            "pkt4-discover-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "discover"},
-            },
-            "pkt4-offer-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "offer"},
-            },
-            "pkt4-request-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "request"},
-            },
-            "pkt4-ack-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "ack"},
-            },
-            "pkt4-nak-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "nak"},
-            },
-            "pkt4-release-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "release"},
-            },
-            "pkt4-decline-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "decline"},
-            },
-            "pkt4-inform-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "inform"},
-            },
-            "pkt4-unknown-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "unknown"},
-            },
-            "pkt4-parse-failed": {
-                "metric": "received_packets",
-                "labels": {"operation": "parse-failed"},
-            },
-            "pkt4-receive-drop": {
-                "metric": "received_packets",
-                "labels": {"operation": "drop"},
-            },
-            # new global packet counters in Kea 3.2
-            "pkt4-lease-query-received": {
-                "metric": "received_packets",
-                "labels": {"operation": "lease-query"},
-            },
-            "pkt4-lease-query-response-active-sent": {
-                "metric": "sent_packets",
-                "labels": {"operation": "lease-query-response-active"},
-            },
-            "pkt4-lease-query-response-unassigned-sent": {
-                "metric": "sent_packets",
-                "labels": {"operation": "lease-query-response-unassigned"},
-            },
-            "pkt4-lease-query-response-unknown-sent": {
-                "metric": "sent_packets",
-                "labels": {"operation": "lease-query-response-unknown"},
-            },
-            "pkt4-admin-filtered": {"metric": "received_packets", "labels": {"operation": "admin-filtered"}},
-            "pkt4-duplicate": {"metric": "received_packets", "labels": {"operation": "duplicate"}},
-            "pkt4-limit-exceeded": {"metric": "received_packets", "labels": {"operation": "limit-exceeded"}},
-            "pkt4-not-for-us": {"metric": "received_packets", "labels": {"operation": "not-for-us"}},
-            "pkt4-processing-failed": {"metric": "received_packets", "labels": {"operation": "processing-failed"}},
-            "pkt4-queue-full": {"metric": "received_packets", "labels": {"operation": "queue-full"}},
-            "pkt4-rfc-violation": {"metric": "received_packets", "labels": {"operation": "rfc-violation"}},
-            "pkt4-service-disabled": {"metric": "received_packets", "labels": {"operation": "service-disabled"}},
-            # per Subnet or pool
-            "v4-allocation-fail-subnet": {
-                "metric": "addresses_allocation_fail",
-                "labels": {"context": "subnet"},
-            },
-            "v4-allocation-fail-shared-network": {
-                "metric": "addresses_allocation_fail",
-                "labels": {"context": "shared-network"},
-            },
-            "v4-allocation-fail-no-pools": {
-                "metric": "addresses_allocation_fail",
-                "labels": {"context": "no-pools"},
-            },
-            "v4-allocation-fail-classes": {
-                "metric": "addresses_allocation_fail",
-                "labels": {"context": "classes"},
-            },
-            "v4-lease-reuses": {
-                "metric": "leases_reused_total",
-            },
-            "assigned-addresses": {
-                "metric": "addresses_assigned_total",
-            },
-            "declined-addresses": {
-                "metric": "addresses_declined_total",
-            },
-            "reclaimed-declined-addresses": {
-                "metric": "addresses_declined_reclaimed_total",
-            },
-            "reclaimed-leases": {
-                "metric": "addresses_reclaimed_total",
-            },
-            "total-addresses": {
-                "metric": "addresses_total",
-            },
-            "v4-reservation-conflicts": {
-                "metric": "reservation_conflicts_total",
-            },
-        }
-        # Ignore list for Global level metrics
-        self.metrics_dhcp4_global_ignore = [
-            # metrics that exist at the subnet level in more detail
-            "cumulative-assigned-addresses",
-            # global aggregate of subnet[N].assigned-addresses; routing it to the
-            # subnet-scoped addresses_assigned_total gauge would mismatch labels.
-            "assigned-addresses",
-            "declined-addresses",
-            # sums of different packet types
-            "reclaimed-declined-addresses",
-            "reclaimed-leases",
-            "v4-reservation-conflicts",
-            "v4-allocation-fail",
-            "v4-allocation-fail-subnet",
-            "v4-allocation-fail-shared-network",
-            "v4-allocation-fail-no-pools",
-            "v4-allocation-fail-classes",
-            "pkt4-sent",
-            "pkt4-received",
-            "v4-lease-reuses",
-        ]
-        # Ignore list for subnet level metrics
-        self.metrics_dhcp4_subnet_ignore = [
-            "cumulative-assigned-addresses",
-            "v4-allocation-fail",
-        ]
-
-    def setup_dhcp6_metrics(self):
-        """
-        Create and register Prometheus Gauges and the mappings and ignore
-        lists used to export DHCPv6 metrics.
-
-        Initializes these instance attributes:
-        - metrics_dhcp6: named Gauge objects for DHCPv6 packet counts,
-          DHCPv4-over-DHCPv6 counts, per-subnet/pool allocation and lease
-          metrics, IA_NA and IA_PD metrics (with appropriate label sets).
-        - metrics_dhcp6_map: mapping from KEA metric keys to entries that
-          specify which Gauge to use and any static labels to apply.
-        - metrics_dhcp6_global_ignore: list of KEA metric keys to ignore
-          at the global (top) level.
-        - metrics_dhcp6_subnet_ignore: list of KEA metric keys to ignore at
-          the subnet level.
-        """
-        self.metrics_dhcp6 = {
-            # Packets sent/received
-            "sent_packets": Gauge(
-                f"{self.prefix_dhcp6}_packets_sent_total",
-                "Packets sent",
-                ["server", "operation"],
-                registry=self.registry,
-            ),
-            "received_packets": Gauge(
-                f"{self.prefix_dhcp6}_packets_received_total",
-                "Packets received",
-                ["server", "operation"],
-                registry=self.registry,
-            ),
-            # DHCPv4-over-DHCPv6
-            "sent_dhcp4_packets": Gauge(
-                f"{self.prefix_dhcp6}_packets_sent_dhcp4_total",
-                "DHCPv4-over-DHCPv6 Packets sent",
-                ["server", "operation"],
-                registry=self.registry,
-            ),
-            "received_dhcp4_packets": Gauge(
-                f"{self.prefix_dhcp6}_packets_received_dhcp4_total",
-                "DHCPv4-over-DHCPv6 Packets received",
-                ["server", "operation"],
-                registry=self.registry,
-            ),
-            # per Subnet or pool
-            "addresses_allocation_fail": Gauge(
-                f"{self.prefix_dhcp6}_allocations_failed_total",
-                "Allocation fail count",
-                [
-                    "server",
-                    "subnet",
-                    "subnet_id",
-                    "context",
-                ],
-                registry=self.registry,
-            ),
-            "addresses_declined_total": Gauge(
-                f"{self.prefix_dhcp6}_addresses_declined_total",
-                "Declined addresses",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "addresses_declined_reclaimed_total": Gauge(
-                f"{self.prefix_dhcp6}_addresses_declined_reclaimed_total",
-                "Declined addresses that were reclaimed",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "addresses_reclaimed_total": Gauge(
-                f"{self.prefix_dhcp6}_addresses_reclaimed_total",
-                "Expired addresses that were reclaimed",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "reservation_conflicts_total": Gauge(
-                f"{self.prefix_dhcp6}_reservation_conflicts_total",
-                "Reservation conflict count",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-            # IA_NA
-            "na_assigned_total": Gauge(
-                f"{self.prefix_dhcp6}_na_assigned_total",
-                "Assigned non-temporary addresses (IA_NA)",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            "na_total": Gauge(
-                f"{self.prefix_dhcp6}_na_total",
-                "Size of non-temporary address pool",
-                ["server", "subnet", "subnet_id", "pool"],
-                registry=self.registry,
-            ),
-            # v6-ia-na-lease-reuses is subnet-level only in Kea (no pool-level variant)
-            "na_reuses_total": Gauge(
-                f"{self.prefix_dhcp6}_na_reuses_total",
-                "Number of IA_NA lease reuses",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-            # IA_PD
-            "pd_assigned_total": Gauge(
-                f"{self.prefix_dhcp6}_pd_assigned_total",
-                "Assigned prefix delegations (IA_PD)",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-            "pd_total": Gauge(
-                f"{self.prefix_dhcp6}_pd_total",
-                "Size of prefix delegation pool",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-            # v6-ia-pd-lease-reuses is subnet-level only in Kea (no pool-level variant)
-            "pd_reuses_total": Gauge(
-                f"{self.prefix_dhcp6}_pd_reuses_total",
-                "Number of IA_PD lease reuses",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-            # Address Registration (Kea 2.5.5+): registered-nas is subnet-level only
-            # (no pool-level equivalent in Kea), so no pool label.
-            "na_registered_total": Gauge(
-                f"{self.prefix_dhcp6}_na_registered_total",
-                "Registered non-temporary addresses via DHCPv6 address registration",
-                ["server", "subnet", "subnet_id"],
-                registry=self.registry,
-            ),
-        }
-
-        self.metrics_dhcp6_map = {
-            # sent_packets
-            "pkt6-advertise-sent": {"metric": "sent_packets", "labels": {"operation": "advertise"}},
-            "pkt6-reply-sent": {"metric": "sent_packets", "labels": {"operation": "reply"}},
-            # Address Registration sent (Kea 2.5.5+)
-            "pkt6-addr-reg-reply-sent": {"metric": "sent_packets", "labels": {"operation": "addr-reg-reply"}},
-            # received_packets
-            "pkt6-receive-drop": {"metric": "received_packets", "labels": {"operation": "drop"}},
-            "pkt6-parse-failed": {"metric": "received_packets", "labels": {"operation": "parse-failed"}},
-            # new global packet counters in Kea 3.2
-            "pkt6-lease-query-received": {"metric": "received_packets", "labels": {"operation": "lease-query"}},
-            "pkt6-lease-query-reply-sent": {"metric": "sent_packets", "labels": {"operation": "lease-query-reply"}},
-            "pkt6-admin-filtered": {"metric": "received_packets", "labels": {"operation": "admin-filtered"}},
-            "pkt6-duplicate": {"metric": "received_packets", "labels": {"operation": "duplicate"}},
-            "pkt6-limit-exceeded": {"metric": "received_packets", "labels": {"operation": "limit-exceeded"}},
-            "pkt6-not-for-us": {"metric": "received_packets", "labels": {"operation": "not-for-us"}},
-            "pkt6-processing-failed": {"metric": "received_packets", "labels": {"operation": "processing-failed"}},
-            "pkt6-queue-full": {"metric": "received_packets", "labels": {"operation": "queue-full"}},
-            "pkt6-rfc-violation": {"metric": "received_packets", "labels": {"operation": "rfc-violation"}},
-            "pkt6-service-disabled": {"metric": "received_packets", "labels": {"operation": "service-disabled"}},
-            "pkt6-solicit-received": {"metric": "received_packets", "labels": {"operation": "solicit"}},
-            "pkt6-advertise-received": {"metric": "received_packets", "labels": {"operation": "advertise"}},
-            "pkt6-request-received": {"metric": "received_packets", "labels": {"operation": "request"}},
-            "pkt6-reply-received": {"metric": "received_packets", "labels": {"operation": "reply"}},
-            "pkt6-renew-received": {"metric": "received_packets", "labels": {"operation": "renew"}},
-            "pkt6-rebind-received": {"metric": "received_packets", "labels": {"operation": "rebind"}},
-            "pkt6-release-received": {"metric": "received_packets", "labels": {"operation": "release"}},
-            "pkt6-decline-received": {"metric": "received_packets", "labels": {"operation": "decline"}},
-            "pkt6-infrequest-received": {"metric": "received_packets", "labels": {"operation": "infrequest"}},
-            "pkt6-unknown-received": {"metric": "received_packets", "labels": {"operation": "unknown"}},
-            # Address Registration received (Kea 2.5.5+).
-            # pkt6-addr-reg-reply-received "should not happen" on a plain DHCPv6
-            # server (only occurs if acting as relay), but Kea initialises the
-            # counter to 0, so it appears in stats and needs to be mapped.
-            "pkt6-addr-reg-inform-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-inform"}},
-            "pkt6-addr-reg-reply-received": {"metric": "received_packets", "labels": {"operation": "addr-reg-reply"}},
-            # DHCPv4-over-DHCPv6
-            "pkt6-dhcpv4-response-sent": {"metric": "sent_dhcp4_packets", "labels": {"operation": "response"}},
-            "pkt6-dhcpv4-query-received": {"metric": "received_dhcp4_packets", "labels": {"operation": "query"}},
-            "pkt6-dhcpv4-response-received": {"metric": "received_dhcp4_packets", "labels": {"operation": "response"}},
-            # per Subnet
-            "v6-allocation-fail-shared-network": {
-                "metric": "addresses_allocation_fail",
-                "labels": {"context": "shared-network"},
-            },
-            "v6-allocation-fail-subnet": {"metric": "addresses_allocation_fail", "labels": {"context": "subnet"}},
-            "v6-allocation-fail-no-pools": {"metric": "addresses_allocation_fail", "labels": {"context": "no-pools"}},
-            "v6-allocation-fail-classes": {"metric": "addresses_allocation_fail", "labels": {"context": "classes"}},
-            "assigned-nas": {"metric": "na_assigned_total"},
-            "assigned-pds": {"metric": "pd_assigned_total"},
-            "declined-addresses": {"metric": "addresses_declined_total"},
-            "declined-reclaimed-addresses": {"metric": "addresses_declined_reclaimed_total"},
-            "reclaimed-declined-addresses": {"metric": "addresses_declined_reclaimed_total"},
-            "reclaimed-leases": {"metric": "addresses_reclaimed_total"},
-            "total-nas": {"metric": "na_total"},
-            "total-pds": {"metric": "pd_total"},
-            "v6-reservation-conflicts": {"metric": "reservation_conflicts_total"},
-            "v6-ia-na-lease-reuses": {"metric": "na_reuses_total"},
-            "v6-ia-pd-lease-reuses": {"metric": "pd_reuses_total"},
-            # Address Registration (Kea 2.5.5+)
-            "registered-nas": {"metric": "na_registered_total"},
-        }
-
-        # Ignore list for Global level metrics
-        self.metrics_dhcp6_global_ignore = [
-            # metrics that exist at the subnet level in more detail
-            "cumulative-assigned-addresses",
-            "declined-addresses",
-            # global aggregates of subnet[N].assigned-nas / assigned-pds; routing
-            # them to the subnet-scoped na_assigned_total / pd_assigned_total gauges
-            # would mismatch labels.
-            "cumulative-assigned-nas",
-            "assigned-nas",
-            "cumulative-assigned-pds",
-            "assigned-pds",
-            # Address Registration cumulative totals (subnet-level detail is sufficient)
-            "cumulative-registered-nas",
-            "reclaimed-declined-addresses",
-            "reclaimed-leases",
-            "v6-reservation-conflicts",
-            "v6-allocation-fail",
-            "v6-allocation-fail-subnet",
-            "v6-allocation-fail-shared-network",
-            "v6-allocation-fail-no-pools",
-            "v6-allocation-fail-classes",
-            "v6-ia-na-lease-reuses",
-            "v6-ia-pd-lease-reuses",
-            "pkt6-sent",
-            "pkt6-received",
-        ]
-        # Ignore list for subnet level metrics
-        self.metrics_dhcp6_subnet_ignore = [
-            "cumulative-assigned-addresses",
-            "cumulative-assigned-nas",
-            "cumulative-assigned-pds",
-            "cumulative-registered-nas",
-            "v6-allocation-fail",
-        ]
-
-    def setup_ddns_metrics(self):
-        """
-        Initialize DDNS-related Prometheus metrics, the mapping from
-        external DDNS metric names to those metrics, and the per-key
-        parsing pattern.
-
-        Creates the following attributes on the instance:
-        - metrics_ddns: dictionary of Prometheus Gauge objects for global
-          DDNS counters (labeled by `server`) and per-key counters
-          (labeled by `server` and `key`).
-        - metrics_ddns_map: mapping from external DDNS metric identifiers
-          to entries in `metrics_ddns`.
-        - ddns_key_pattern: compiled regex that extracts the key and metric
-          name from strings of the form `key[<key>].<metric>`.
-        """
-        self.metrics_ddns = {
-            # Global DDNS metrics
-            "ncr_error": Gauge(
-                f"{self.prefix_ddns}_ncr_error_total", "NCR processing errors", ["server"], registry=self.registry
-            ),
-            "ncr_invalid": Gauge(
-                f"{self.prefix_ddns}_ncr_invalid_total", "Invalid NCRs received", ["server"], registry=self.registry
-            ),
-            "ncr_received": Gauge(
-                f"{self.prefix_ddns}_ncr_received_total", "NCRs received", ["server"], registry=self.registry
-            ),
-            "queue_full": Gauge(
-                f"{self.prefix_ddns}_queue_full_total", "Queue manager queue full", ["server"], registry=self.registry
-            ),
-            "update_error": Gauge(
-                f"{self.prefix_ddns}_update_error_total", "Update errors", ["server"], registry=self.registry
-            ),
-            "update_sent": Gauge(
-                f"{self.prefix_ddns}_update_sent_total", "Updates sent", ["server"], registry=self.registry
-            ),
-            "update_signed": Gauge(
-                f"{self.prefix_ddns}_update_signed_total", "Updates signed", ["server"], registry=self.registry
-            ),
-            "update_success": Gauge(
-                f"{self.prefix_ddns}_update_success_total", "Successful updates", ["server"], registry=self.registry
-            ),
-            "update_timeout": Gauge(
-                f"{self.prefix_ddns}_update_timeout_total", "Update timeouts", ["server"], registry=self.registry
-            ),
-            "update_unsigned": Gauge(
-                f"{self.prefix_ddns}_update_unsigned_total", "Updates unsigned", ["server"], registry=self.registry
-            ),
-            # Per-key metrics
-            "key_update_error": Gauge(
-                f"{self.prefix_ddns}_key_update_error_total",
-                "Per-key update errors",
-                ["server", "key"],
-                registry=self.registry,
-            ),
-            "key_update_sent": Gauge(
-                f"{self.prefix_ddns}_key_update_sent_total",
-                "Per-key updates sent",
-                ["server", "key"],
-                registry=self.registry,
-            ),
-            "key_update_success": Gauge(
-                f"{self.prefix_ddns}_key_update_success_total",
-                "Per-key successful updates",
-                ["server", "key"],
-                registry=self.registry,
-            ),
-            "key_update_timeout": Gauge(
-                f"{self.prefix_ddns}_key_update_timeout_total",
-                "Per-key update timeouts",
-                ["server", "key"],
-                registry=self.registry,
-            ),
-        }
-
-        self.metrics_ddns_map = {
-            "ncr-error": {"metric": "ncr_error"},
-            "ncr-invalid": {"metric": "ncr_invalid"},
-            "ncr-received": {"metric": "ncr_received"},
-            "queue-mgr-queue-full": {"metric": "queue_full"},
-            "update-error": {"metric": "update_error"},
-            "update-sent": {"metric": "update_sent"},
-            "update-signed": {"metric": "update_signed"},
-            "update-success": {"metric": "update_success"},
-            "update-timeout": {"metric": "update_timeout"},
-            "update-unsigned": {"metric": "update_unsigned"},
-        }
-
-        self.ddns_per_key_map = {
-            "update-error": "key_update_error",
-            "update-sent": "key_update_sent",
-            "update-success": "key_update_success",
-            "update-timeout": "key_update_timeout",
-        }
-
-        # Pattern to match per-key metrics: key[domain.name.].metric-name
-        self.ddns_key_pattern = re.compile(r"^key\[(?P<key>[^\]]+)\]\.(?P<metric>.+)$")
-
-    def _resolve_subnet_labels(self, key, subnet_match, server_id, dhcp_version, subnets, subnet_ignore, labels):
-        """Resolve subnet/pool context from a subnet pattern match.
-
-        Returns (resolved_key, labels) on success, or None to skip this metric.
-        """
         subnet_id = int(subnet_match.group("subnet_id"))
+        statistic = subnet_match.group("statistic")
+        pool_kind = subnet_match.group("pool_kind")
         pool_index = subnet_match.group("pool_index")
-        pool_metric = subnet_match.group("pool_metric")
-        subnet_metric = subnet_match.group("subnet_metric")
 
-        if pool_metric in subnet_ignore or subnet_metric in subnet_ignore:
-            return None
-
-        subnet_data = subnets.get(subnet_id, [])
+        subnet_data = subnets.get(subnet_id, {})
         if not subnet_data:
-            cache_key = (server_id, dhcp_version)
-            missing_info = self.subnet_missing_info_sent.setdefault(cache_key, set())
-            if subnet_id not in missing_info:
-                missing_info.add(subnet_id)
-                click.echo(
-                    f"Ignoring metric because subnet vanished from configuration: {dhcp_version.name=}, {subnet_id=}",
-                    file=sys.stderr,
-                )
+            self._report_missing(server_id, dhcp_version, subnet_id, f"{dhcp_version.name=}, {subnet_id=}")
             return None
 
-        labels["subnet"] = subnet_data.get("subnet")
-        labels["subnet_id"] = subnet_id
+        # A missing key must not reach Prometheus as the string "None", which no
+        # query could tell from a real value.
+        labels = {"subnet": subnet_data.get("subnet") or "", "subnet_id": str(subnet_id)}
+        if pool_kind is None:
+            return Scope.SUBNET, statistic, labels
 
-        if pool_index:
-            pool_index = int(pool_index)
-            subnet_pools = [pool.get("pool") for pool in subnet_data.get("pools", [])]
-
-            if len(subnet_pools) <= pool_index:
-                cache_key = (server_id, dhcp_version)
-                missing_info = self.subnet_missing_info_sent.setdefault(cache_key, set())
-                missing_key = f"{subnet_id}-{pool_index}"
-                if missing_key not in missing_info:
-                    missing_info.add(missing_key)
-                    click.echo(
-                        "Ignoring metric because subnet vanished from "
-                        f"configuration: {dhcp_version.name=}, "
-                        f"{subnet_id=}, {pool_index=}",
-                        file=sys.stderr,
-                    )
-                return None
-            return pool_metric, labels | {"pool": subnet_pools[pool_index]}
+        pool_index = int(pool_index)
+        if pool_kind == "pd-pool":
+            pools = [_pd_pool_name(pool) for pool in subnet_data.get("pd-pools", [])]
+            scope, label = Scope.PD_POOL, "pd_pool"
         else:
-            return subnet_metric, labels | {"pool": ""}
+            pools = [pool.get("pool") or "" for pool in subnet_data.get("pools", [])]
+            scope, label = Scope.POOL, "pool"
 
-    def _handle_ddns_per_key(self, key, value, labels):
-        """Handle DDNS per-key metrics. Returns True if handled, False otherwise."""
-        key_match = self.ddns_key_pattern.match(key)
-        if not key_match:
-            return False
-
-        key_name = key_match.group("key")
-        metric_name = key_match.group("metric")
-
-        metric_key = self.ddns_per_key_map.get(metric_name)
-        if metric_key is None:
-            self._report_unhandled(
-                key,
-                f"Unhandled DDNS per-key metric '{key}' "
-                "please file an issue at https://github.com/marcinpsk/kea-exporter",
+        if len(pools) <= pool_index:
+            self._report_missing(
+                server_id,
+                dhcp_version,
+                f"{subnet_id}-{pool_kind}-{pool_index}",
+                f"{dhcp_version.name=}, {subnet_id=}, {pool_index=}",
             )
-            return True
+            return None
 
-        metric = self.metrics_ddns[metric_key]
-        labels["key"] = key_name
-        self._set_metric(metric, labels, value)
-        return True
+        labels[label] = pools[pool_index]
+        return scope, statistic, labels
+
+    def _report_missing(self, server_id, dhcp_version, cache_entry, detail):
+        """Report a vanished subnet or pool once per server and daemon."""
+        missing_info = self.subnet_missing_info_sent.setdefault((server_id, dhcp_version), set())
+        if cache_entry in missing_info:
+            return
+        missing_info.add(cache_entry)
+        click.echo(
+            f"Ignoring metric because subnet vanished from configuration: {detail}",
+            file=sys.stderr,
+        )
 
     def _set_metric(self, metric, labels, value):
-        """Filter labels to those configured on the metric and set the value.
+        """Set the value, filling any label the reading did not supply.
 
-        Returns ``True`` when the value was set, ``False`` when *labels* does not
-        supply every label the gauge declares. The latter happens when a statistic
-        is reported at a scope that lacks the gauge's labels — e.g. a global-scope
-        aggregate (only ``server``) routed to a subnet-scoped gauge. Skipping such a
-        value avoids ``prometheus_client`` raising ``ValueError('Incorrect label
-        names')``, which would otherwise abort the entire scrape for the target.
+        A reading shallower than the metric's deepest scope leaves the deeper
+        labels empty, so a subnet total and a pool total stay distinct series.
         """
-        # _labelnames is a private attribute of prometheus_client.Gauge but
-        # there is no public accessor; access is centralised here.
-        filtered = {k: v for k, v in labels.items() if k in metric._labelnames}
-        if set(filtered) != set(metric._labelnames):
-            return False
+        filtered = {name: str(labels.get(name, "")) for name in metric._labelnames}
         metric.labels(**filtered).set(value)
         # Record this label combination so stale entries can be pruned later.
         gauge_id = id(metric)
         if gauge_id not in self._seen_labels_current:
             self._seen_labels_current[gauge_id] = (metric, set())
-        label_tuple = tuple(str(filtered.get(k, "")) for k in metric._labelnames)
-        self._seen_labels_current[gauge_id][1].add(label_tuple)
-        return True
+        self._seen_labels_current[gauge_id][1].add(tuple(filtered[name] for name in metric._labelnames))
 
     def _report_unhandled(self, key, message):
-        """Report an unhandled metric key once."""
+        """Report an unhandled statistic once."""
         if key not in self.unhandled_metrics:
             click.echo(message)
             self.unhandled_metrics.add(key)
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
-        """Parse KEA metrics and export them as Prometheus Gauges."""
-        if dhcp_version is DHCPVersion.DHCP4:
-            metrics_map = self.metrics_dhcp4_map
-            metrics = self.metrics_dhcp4
-            global_ignore = self.metrics_dhcp4_global_ignore
-            subnet_ignore = self.metrics_dhcp4_subnet_ignore
-        elif dhcp_version is DHCPVersion.DHCP6:
-            metrics_map = self.metrics_dhcp6_map
-            metrics = self.metrics_dhcp6
-            global_ignore = self.metrics_dhcp6_global_ignore
-            subnet_ignore = self.metrics_dhcp6_subnet_ignore
-        elif dhcp_version is DHCPVersion.DDNS:
-            metrics_map = self.metrics_ddns_map
-            metrics = self.metrics_ddns
-            global_ignore = []
-            subnet_ignore = []
-        else:
+        """Parse Kea statistics and export them as Prometheus metrics."""
+        index = self.index.get(dhcp_version)
+        if index is None:
             return
+        metrics = self.metrics[dhcp_version]
+        never_export = catalogue.NEVER_EXPORT[dhcp_version]
+        known = self.known[dhcp_version]
 
         for key, data in arguments.items():
-            if key in global_ignore:
-                continue
-
             if not isinstance(data, list) or not data:
                 continue
-            value, _ = data[0]
-            labels = {"server": server}
+            # Kea reports [[value, timestamp]]. Unpacking anything else raises,
+            # and update() would report that as a failure of the whole target.
+            reading = data[0]
+            if not isinstance(reading, (list, tuple)) or len(reading) != 2:
+                continue
+            value = reading[0]
 
-            subnet_match = self.subnet_pattern.match(key)
-            if subnet_match:
-                result = self._resolve_subnet_labels(
-                    key, subnet_match, server, dhcp_version, subnets, subnet_ignore, labels
-                )
-                if result is None:
+            resolved = self._resolve_selector(key, server, dhcp_version, subnets)
+            if resolved is None:
+                continue
+            scope, statistic, labels = resolved
+
+            if statistic in never_export:
+                continue
+
+            entry = index.get((statistic, scope))
+            if entry is None:
+                if statistic in known:
+                    # Kea emits global aggregates of subnet-scoped statistics
+                    # routinely, so those are dropped without comment. Any
+                    # other scope is a surprise worth reporting.
+                    if scope is not Scope.GLOBAL:
+                        self._report_unhandled(
+                            key,
+                            f"Skipping statistic '{key}': '{statistic}' is not exported at "
+                            f"{scope.value} scope; please file an issue at {ISSUE_URL}",
+                        )
                     continue
-                key, labels = result
-
-            if dhcp_version is DHCPVersion.DDNS and self._handle_ddns_per_key(key, value, labels):
+                self._report_unhandled(key, f"Unhandled metric '{key}' please file an issue at {ISSUE_URL}")
                 continue
 
-            # Handle standard metrics
-            metric_info = metrics_map.get(key)
-            if metric_info is None:
-                self._report_unhandled(
-                    key, f"Unhandled metric '{key}' please file an issue at https://github.com/marcinpsk/kea-exporter"
-                )
-                continue
+            self._set_metric(metrics[entry.metric], {"server": server, **labels, **entry.labels}, value)
 
-            metric = metrics[metric_info["metric"]]
-            labels.update(metric_info.get("labels", {}))
-            if not self._set_metric(metric, labels, value):
-                self._report_unhandled(
-                    key,
-                    f"Skipping metric '{key}': reported at a scope that does not "
-                    f"supply all labels of gauge '{metric_info['metric']}' "
-                    f"({list(metric._labelnames)}); please file an issue at "
-                    "https://github.com/marcinpsk/kea-exporter",
-                )
+
+def _pd_pool_name(pool: dict) -> str:
+    """Identify a prefix pool as prefix/prefix-len-delegated-len.
+
+    Kea allows several pd-pools to share a prefix and differ only in the
+    delegated length, so the delegated length is part of the identity.
+    """
+    return f"{pool.get('prefix')}/{pool.get('prefix-len')}-{pool.get('delegated-len')}"
+
+
+def _safe_target(target: str) -> str:
+    """Strip embedded credentials from a target, for logging."""
+    try:
+        parsed = urlparse(target)
+        # A URL may carry a password with no username, where username is "".
+        if not parsed.username and not parsed.password:
+            return target
+        # Cut the userinfo off the netloc; parsed.hostname would drop the
+        # brackets from an IPv6 host. Same reconstruction as KeaHTTPClient.
+        return f"{parsed.scheme}://{parsed.netloc.rpartition('@')[2]}{parsed.path}"
+    except Exception:
+        return target  # non-URL paths (UDS socket paths) pass through unchanged
