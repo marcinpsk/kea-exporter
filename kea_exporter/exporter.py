@@ -1,5 +1,4 @@
 import re
-import sys
 import time
 from urllib.parse import urlparse
 
@@ -211,7 +210,7 @@ class Exporter:
         missing_info.add(cache_entry)
         click.echo(
             f"Ignoring metric because subnet vanished from configuration: {detail}",
-            file=sys.stderr,
+            err=True,
         )
 
     def _set_metric(self, metric, labelnames, labels, value):

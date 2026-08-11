@@ -338,7 +338,10 @@ def test_vanished_subnet_is_reported_once(exporter, capsys):
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"subnet[9].assigned-addresses": stat(1)}, {})
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"subnet[9].assigned-addresses": stat(2)}, {})
 
-    assert capsys.readouterr().err.count("subnet vanished") == 1
+    captured = capsys.readouterr()
+    assert captured.err.count("subnet vanished") == 1
+    assert "Ignoring metric because subnet vanished" in captured.err
+    assert captured.out == ""
 
 
 def test_vanished_pool_is_reported_once(exporter, capsys):
