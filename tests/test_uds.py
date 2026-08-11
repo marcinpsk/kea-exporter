@@ -5,43 +5,85 @@ Tests for kea_exporter.uds module
 import json
 import os
 import socket
+import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 from kea_exporter import DHCPVersion
 from kea_exporter.uds import KeaConfigError, KeaSocketClient
 
+SOCKET_SUBNET = {"id": 1, "subnet": "198.18.0.0/24"}
+SOCKET_STATISTICS = {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]}
+
+
+def _answer_kea_queries(listener):
+    responses = {
+        "config-get": {"result": 0, "arguments": {"Dhcp4": {"subnet4": [SOCKET_SUBNET]}}},
+        "statistic-get-all": {"result": 0, "arguments": SOCKET_STATISTICS},
+    }
+    for _ in range(len(responses)):
+        connection, _ = listener.accept()
+        with connection:
+            request = json.loads(connection.recv(4096))
+            connection.sendall(json.dumps(responses[request["command"]]).encode())
+
 
 class TestKeaSocketClientInit(unittest.TestCase):
     """Test KeaSocketClient initialization"""
 
-    @patch("os.access")
-    def test_init_socket_not_found(self, mock_access):
-        """Test initialization with non-existent socket"""
-        mock_access.side_effect = lambda path, mode: False if mode == os.F_OK else True
+    def test_a_missing_socket_is_reported_by_the_scrape(self):
+        """Kea may create the socket after the exporter starts, so it is checked per scrape."""
+        with tempfile.TemporaryDirectory() as tmp:
+            client = KeaSocketClient(os.path.join(tmp, "absent.sock"))
 
-        with self.assertRaises(FileNotFoundError) as context:
-            KeaSocketClient("/nonexistent/socket")
+            with self.assertRaises(FileNotFoundError) as context:
+                list(client.stats())
 
         self.assertIn("does not exist", str(context.exception))
 
-    @patch("os.access")
-    def test_init_socket_no_permissions(self, mock_access):
-        """Test initialization with socket without permissions"""
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permissions")
+    def test_a_socket_without_write_permission_is_reported_by_the_scrape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kea.sock")
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(path)
+                os.chmod(path, 0)
+                client = KeaSocketClient(path)
 
-        def access_check(path, mode):
-            if mode == os.F_OK:
-                return True
-            if mode == (os.R_OK | os.W_OK):
-                return False
-            return True
+                with self.assertRaises(PermissionError) as context:
+                    list(client.stats())
 
-        mock_access.side_effect = access_check
+        self.assertIn("No write permission", str(context.exception))
 
-        with self.assertRaises(PermissionError) as context:
-            KeaSocketClient("/path/to/socket")
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permissions")
+    def test_a_write_only_socket_can_be_scraped(self):
+        """The Unix socket pathname needs write permission, not read permission."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kea.sock")
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(path)
+                listener.listen()
+                server = threading.Thread(target=_answer_kea_queries, args=(listener,), daemon=True)
+                server.start()
+                os.chmod(path, 0o200)
 
-        self.assertIn("No read/write permissions", str(context.exception))
+                self.assertFalse(os.access(path, os.R_OK))
+                self.assertTrue(os.access(path, os.W_OK))
+                rows = list(KeaSocketClient(path).stats())
+                server.join(timeout=1)
+
+        self.assertFalse(server.is_alive())
+        self.assertEqual(
+            rows,
+            [(path, DHCPVersion.DHCP4, SOCKET_STATISTICS, {SOCKET_SUBNET["id"]: SOCKET_SUBNET})],
+        )
+
+    def test_construction_touches_nothing(self):
+        """Construction records the path only, so a target that is down still builds."""
+        client = KeaSocketClient("/nonexistent/socket")
+
+        self.assertEqual(client.server_id, "/nonexistent/socket")
 
     @patch("os.access")
     @patch("os.path.abspath")

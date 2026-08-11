@@ -48,6 +48,31 @@ class InMemoryTarget:
         yield from self.rows
 
 
+class ScriptedTarget:
+    """A target whose successive scrapes are scripted.
+
+    Each entry is either the rows that scrape yields, or an exception it
+    raises. Raising from the generator body matches the real adapters, where
+    nothing happens until the Exporter iterates.
+    """
+
+    def __init__(self, *scrapes, server_id="memory://kea"):
+        self._server_id = server_id
+        self.scrapes = list(scrapes)
+        self.calls = 0
+
+    @property
+    def server_id(self):
+        return self._server_id
+
+    def stats(self):
+        self.calls += 1
+        outcome = self.scrapes.pop(0) if self.scrapes else []
+        if isinstance(outcome, Exception):
+            raise outcome
+        yield from outcome
+
+
 class FailingTarget:
     """A target whose stats() raises, for the per-target error path."""
 

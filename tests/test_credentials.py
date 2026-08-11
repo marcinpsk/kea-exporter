@@ -100,10 +100,11 @@ def kea6(no_proxy):
 def test_password_never_reaches_the_initialisation_failure_message(registry, capsys, target, expected):
     Exporter(targets=[target], registry=registry, **CERT_WITHOUT_KEY)
 
-    out = capsys.readouterr().out
-    assert "Failed to initialize target" in out, out
-    assert PASSWORD not in out, out
-    assert expected in out, out
+    output = capsys.readouterr()
+    assert "Failed to initialize target" in output.err, output.err
+    assert PASSWORD not in output.err, output.err
+    assert expected in output.err, output.err
+    assert output.out == ""
 
 
 @pytest.mark.parametrize(

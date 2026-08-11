@@ -9,9 +9,8 @@ from prometheus_client import Gauge
 from kea_exporter import DHCPVersion, catalogue
 from kea_exporter.catalogue import Scope
 from kea_exporter.http import KeaHTTPClient
+from kea_exporter.target import KeaTarget
 from kea_exporter.uds import KeaSocketClient
-
-MAX_TARGET_RETRIES = 10
 
 ISSUE_URL = "https://github.com/marcinpsk/kea-exporter"
 
@@ -36,9 +35,8 @@ class Exporter:
             targets (Iterable[str]): Iterable of target addresses. Each target
                 is parsed as a URL; if it has a URL scheme a KeaHTTPClient is
                 created, otherwise if it has a path a KeaSocketClient is
-                created. Targets that cannot be parsed are skipped; targets
-                that raise during client creation keep a placeholder so
-                update() can retry them.
+                created. Construction failures are configuration errors, so
+                the target is reported and dropped.
             stale_timeout (int): Remove labels for a server silent longer than
                 this many seconds. 0 disables the timeout.
             registry (CollectorRegistry): Registry to register metrics with.
@@ -82,27 +80,26 @@ class Exporter:
         self.stale_timeout = stale_timeout
         self._last_success: dict[tuple[str, DHCPVersion], float] = {}
 
-        self.targets = []
+        # Targets a scrape can be attempted against. Building one performs no
+        # I/O, so anything that raises below is a configuration error that
+        # retrying cannot fix, and that target is dropped rather than kept as a
+        # placeholder to retry.
+        self.targets: list[KeaTarget] = []
+        # server_id of every target whose last scrape failed, so a target that
+        # stays down is reported once rather than once per scrape.
+        self._failing_targets: set[str] = set()
+
         for target in targets:
             url = urlparse(target)
-            client = None
             try:
                 if url.scheme:
-                    client = KeaHTTPClient(target, **kwargs)
+                    self.targets.append(KeaHTTPClient(target, **kwargs))
                 elif url.path:
-                    client = KeaSocketClient(target, **kwargs)
+                    self.targets.append(KeaSocketClient(target, **kwargs))
                 else:
-                    click.echo(f"Unable to parse target argument: {target}")
-                    continue
+                    click.echo(f"Unable to parse target argument: {target}", err=True)
             except Exception as ex:
-                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}")
-                # Keep placeholder so update() can retry initialization
-                self.targets.append(
-                    {"target": target, "client": None, "last_error": str(ex), "kwargs": kwargs, "retry_count": 0}
-                )
-                continue
-
-            self.targets.append(client)
+                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
 
     def _build_metrics(self, version: DHCPVersion) -> dict:
         """Create one Gauge per metric the catalogue declares for this daemon."""
@@ -118,36 +115,19 @@ class Exporter:
             for metric, entries in catalogue.entries_by_metric(version).items()
         }
 
-    def _try_init_target(self, i: int, target: dict):
-        """Attempt to re-initialize a failed target placeholder.
+    def _report_target_failure(self, target: KeaTarget, ex: Exception) -> None:
+        """Report a failing target once, not once per scrape while it stays down."""
+        if target.server_id in self._failing_targets:
+            return
+        self._failing_targets.add(target.server_id)
+        click.echo(f"Failed to collect metrics from {target.server_id}: {type(ex).__name__}: {ex}", err=True)
 
-        Returns the newly created client on success, or None if the attempt
-        was skipped (retry limit reached) or failed.
-        """
-        raw = target["target"]
-        retry_count = target["retry_count"]
-        if retry_count >= MAX_TARGET_RETRIES:
-            return None
-        url = urlparse(raw)
-        try:
-            if url.scheme:
-                client = KeaHTTPClient(raw, **target["kwargs"])
-            elif url.path:
-                client = KeaSocketClient(raw, **target["kwargs"])
-            else:
-                return None
-            self.targets[i] = client
-            click.echo(f"Successfully initialized previously failed target: {getattr(client, '_server_id', raw)}")
-            return client
-        except Exception as ex:
-            target["retry_count"] = retry_count + 1
-            if target["retry_count"] >= MAX_TARGET_RETRIES:
-                click.echo(
-                    f"Target {_safe_target(raw)} failed to initialize after {MAX_TARGET_RETRIES} retries, giving up.",
-                    err=True,
-                )
-            target["last_error"] = str(ex)
-            return None
+    def _report_target_recovery(self, target: KeaTarget) -> None:
+        """Close the report opened by _report_target_failure."""
+        if target.server_id not in self._failing_targets:
+            return
+        self._failing_targets.discard(target.server_id)
+        click.echo(f"Collecting metrics from {target.server_id} again", err=True)
 
     def update(self):
         """
@@ -155,8 +135,8 @@ class Exporter:
 
         Iterates each configured client, retrieves that client's reported
         statistics, and processes each response so the metrics reflect the
-        latest values. Uninitialized targets (from failed client creation) are
-        retried each update cycle. After all targets are processed, label
+        latest values. Targets with construction failures were reported and
+        dropped during initialization. After all targets are processed, label
         combinations that existed in the previous cycle but not this one are
         removed from the registry, but only for servers that successfully
         responded this cycle, to avoid dropping valid metrics due to transient
@@ -165,13 +145,7 @@ class Exporter:
         self._seen_labels_current = {}
         successful_servers: set[tuple[str, DHCPVersion]] = set()
 
-        for i, target in enumerate(self.targets):
-            # Retry uninitialized targets
-            if isinstance(target, dict) and target.get("client") is None:
-                target = self._try_init_target(i, target)
-                if target is None:
-                    continue
-
+        for target in self.targets:
             try:
                 # Materialise the generator before mutating any gauges so that a
                 # mid-stream exception cannot leave a partial snapshot in the registry
@@ -185,12 +159,9 @@ class Exporter:
                 for sv_pair in completed_server_versions:
                     successful_servers.add(sv_pair)
                     self._last_success[sv_pair] = scrape_finished_at
+                self._report_target_recovery(target)
             except Exception as ex:
-                click.echo(
-                    f"Failed to collect metrics from {getattr(target, '_server_id', target)}: "
-                    f"{type(ex).__name__}: {ex}",
-                    err=True,
-                )
+                self._report_target_failure(target, ex)
 
         # Remove stale label combinations (e.g. a renamed pool) that were
         # present last cycle but absent this cycle.  Only do this for servers
@@ -228,8 +199,6 @@ class Exporter:
                 if scraped_ok or timed_out or server_idx is None:
                     try:
                         gauge.remove(*label_tuple)
-                    except KeyError:
-                        pass
                     except Exception as e:
                         click.echo(f"Unexpected error removing gauge label: {e}", err=True)
                 else:

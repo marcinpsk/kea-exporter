@@ -2,13 +2,106 @@
 Tests for kea_exporter.http module
 """
 
+import json
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
+from prometheus_client import CollectorRegistry
 
 from kea_exporter import DHCPVersion
+from kea_exporter.exporter import Exporter
 from kea_exporter.http import KeaHTTPClient
+
+
+class _KeaHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        """Answer the subset of Kea commands used by the integration tests."""
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if body["command"] == "config-get" and "service" not in body:
+            payload = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        elif body["command"] == "config-get":
+            if self.server.failed_subnet_requests > 0:
+                self.server.failed_subnet_requests -= 1
+                self._write({"error": "unavailable"}, status=503)
+                return
+            payload = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        else:
+            self.server.statistic_services.append(body["service"])
+            payload = [
+                {
+                    "result": 0,
+                    "arguments": {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]},
+                }
+            ]
+        self._write(payload)
+
+    def _write(self, payload, status=200):
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_args):
+        """Silence the default stderr access log."""
+
+
+@pytest.fixture
+def kea_http_server(monkeypatch):
+    """Run a controllable Kea-compatible server on the IPv4 loopback."""
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _KeaHandler)
+    server.failed_subnet_requests = 0
+    server.statistic_services = []
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_target_recovers_when_initial_subnet_discovery_fails(kea_http_server):
+    """A repeated initial discovery must replace, not duplicate, the daemon list."""
+    kea_http_server.failed_subnet_requests = 1
+    target = f"http://127.0.0.1:{kea_http_server.server_address[1]}"
+    registry = CollectorRegistry()
+    exporter = Exporter(targets=[target], registry=registry)
+    client = exporter.targets[0]
+
+    with pytest.raises(requests.HTTPError):
+        list(client.stats())
+    exporter.update()
+
+    assert client.modules == ["dhcp4"]
+    assert kea_http_server.statistic_services == [["dhcp4"]]
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_packets_sent_total",
+            {"server": target, "operation": "ack"},
+        )
+        == 7
+    )
+
+
+def test_subnet_refresh_outage_is_reported_once_and_closed_on_recovery(kea_http_server, capsys):
+    """Repeated refresh failures must produce one warning until recovery."""
+    target = f"http://127.0.0.1:{kea_http_server.server_address[1]}"
+    client = KeaHTTPClient(target)
+    list(client.stats())
+
+    kea_http_server.failed_subnet_requests = 3
+    for _ in range(3):
+        list(client.stats())
+    list(client.stats())
+
+    output = capsys.readouterr()
+    assert output.err.count("Warning: failed to refresh subnets") == 1
+    assert output.err.count(f"Refreshed subnets for {target} again") == 1
 
 
 class TestKeaHTTPClientInit(unittest.TestCase):
@@ -104,80 +197,59 @@ class TestKeaHTTPClientInit(unittest.TestCase):
         self.assertEqual(client.timeout, 10)
 
     @patch("kea_exporter.http.requests.post")
-    def test_init_calls_load_modules(self, mock_post):
-        """Test that initialization calls load_modules"""
-        mock_response = Mock()
-        mock_response.json.return_value = [{"result": 0, "arguments": {"dhcp4": {}}}]
-        mock_post.return_value = mock_response
-
+    def test_construction_makes_no_request(self, mock_post):
+        """Construction is pure, so a target that is down at start-up still builds."""
         KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
 
-        # load_modules should have been called (makes a POST request)
-        self.assertTrue(mock_post.called)
+        self.assertFalse(mock_post.called)
 
-    @patch("kea_exporter.http.requests.post")
-    def test_init_tls_no_verify_disables_verification(self, mock_post):
-        """tls_no_verify=True passes verify=False to all requests.post calls."""
+    def prime(self, mock_post):
+        """Answer every Kea command with a minimal DHCPv4 configuration."""
         mock_post.return_value = Mock()
         mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
         mock_post.return_value.raise_for_status.return_value = None
-        client = KeaHTTPClient("https://kea:443", tls_no_verify=True)  # noqa: F841
-        self.assertTrue(len(mock_post.call_args_list) > 0)
+
+    def assert_verify_on_every_request(self, mock_post, expected):
+        """Every request a scrape makes must carry the same TLS setting."""
+        self.assertGreater(len(mock_post.call_args_list), 0, "no request was made, so this asserts nothing")
         for call in mock_post.call_args_list:
-            self.assertEqual(call.kwargs.get("verify"), False)
+            self.assertEqual(call.kwargs.get("verify"), expected)
 
     @patch("kea_exporter.http.requests.post")
-    def test_init_ca_bundle_passed_to_requests(self, mock_post):
-        """ca_bundle path is forwarded as verify= to all requests.post calls."""
-        mock_post.return_value = Mock()
-        mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-        mock_post.return_value.raise_for_status.return_value = None
-        client = KeaHTTPClient("https://kea:443", ca_bundle="/etc/ssl/my-ca.pem")  # noqa: F841
-        self.assertTrue(len(mock_post.call_args_list) > 0)
-        for call in mock_post.call_args_list:
-            self.assertEqual(call.kwargs.get("verify"), "/etc/ssl/my-ca.pem")
-
-    @patch("kea_exporter.http.requests.post")
-    def test_init_default_tls_verify_is_true(self, mock_post):
-        """Default behaviour verifies TLS (verify=True)."""
-        mock_post.return_value = Mock()
-        mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-        mock_post.return_value.raise_for_status.return_value = None
-        client = KeaHTTPClient("https://kea:443")  # noqa: F841
-        self.assertTrue(len(mock_post.call_args_list) > 0)
-        for call in mock_post.call_args_list:
-            self.assertEqual(call.kwargs.get("verify"), True)
-
-    @patch("kea_exporter.http.requests.post")
-    def test_stats_tls_no_verify(self, mock_post):
-        """stats() must forward verify=False when tls_no_verify=True."""
-        init_resp = Mock()
-        init_resp.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-        init_resp.raise_for_status.return_value = None
-        stats_resp = Mock()
-        stats_resp.json.return_value = [{"result": 0, "arguments": {}}]
-        stats_resp.raise_for_status.return_value = None
-        # init calls: load_modules (1) + load_subnets (1); stats() adds load_subnets + statistic-get-all
-        mock_post.side_effect = [init_resp, init_resp, init_resp, stats_resp]
+    def test_tls_no_verify_disables_verification(self, mock_post):
+        """tls_no_verify=True passes verify=False to every requests.post call."""
         client = KeaHTTPClient("https://kea:443", tls_no_verify=True)
-        mock_post.reset_mock()
-        mock_post.return_value = stats_resp
+        self.prime(mock_post)
         list(client.stats())
-        self.assertTrue(len(mock_post.call_args_list) > 0)
-        for call in mock_post.call_args_list:
-            self.assertEqual(call.kwargs.get("verify"), False)
+
+        self.assert_verify_on_every_request(mock_post, False)
+
+    @patch("kea_exporter.http.requests.post")
+    def test_ca_bundle_passed_to_requests(self, mock_post):
+        """ca_bundle path is forwarded as verify= to every requests.post call."""
+        client = KeaHTTPClient("https://kea:443", ca_bundle="/etc/ssl/my-ca.pem")
+        self.prime(mock_post)
+        list(client.stats())
+
+        self.assert_verify_on_every_request(mock_post, "/etc/ssl/my-ca.pem")
+
+    @patch("kea_exporter.http.requests.post")
+    def test_default_tls_verify_is_true(self, mock_post):
+        """Default behaviour verifies TLS (verify=True)."""
+        client = KeaHTTPClient("https://kea:443")
+        self.prime(mock_post)
+        list(client.stats())
+
+        self.assert_verify_on_every_request(mock_post, True)
 
     @patch("kea_exporter.http.requests.post")
     def test_tls_no_verify_takes_precedence_over_ca_bundle(self, mock_post):
         """When both tls_no_verify and ca_bundle are set, no-verify wins (verify=False)."""
-        mock_post.return_value = Mock()
-        mock_post.return_value.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-        mock_post.return_value.raise_for_status.return_value = None
-        client = KeaHTTPClient(  # noqa: F841
-            "https://kea:443", tls_no_verify=True, ca_bundle="/etc/ssl/certs/ca-certificates.crt"
-        )
-        for call in mock_post.call_args_list:
-            self.assertEqual(call.kwargs.get("verify"), False)
+        client = KeaHTTPClient("https://kea:443", tls_no_verify=True, ca_bundle="/etc/ssl/certs/ca-certificates.crt")
+        self.prime(mock_post)
+        list(client.stats())
+
+        self.assert_verify_on_every_request(mock_post, False)
 
 
 class TestKeaHTTPClientLoadModules(unittest.TestCase):
@@ -210,6 +282,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertIn("dhcp4", client.modules)
         self.assertIn("dhcp6", client.modules)
@@ -226,6 +300,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertIn("dhcp4", client.modules)
 
@@ -241,6 +317,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertIn("dhcp6", client.modules)
 
@@ -256,6 +334,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertIn("ddns", client.modules)
 
@@ -271,6 +351,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertIn("ddns", client.modules)
         self.assertNotIn("d2", client.modules)
@@ -287,6 +369,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertIn("dhcp4", client.modules)
         self.assertIn("ddns", client.modules)
@@ -302,7 +386,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
 
         mock_post.side_effect = [config_response, subnets_response]
 
-        KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None, timeout=25)
+        client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None, timeout=25)
+        client.load_modules()
 
         # Check that timeout was passed to requests.post
         call_args = mock_post.call_args_list[0]
@@ -319,7 +404,8 @@ class TestKeaHTTPClientLoadModules(unittest.TestCase):
 
         mock_post.side_effect = [config_response, subnets_response]
 
-        KeaHTTPClient(target="http://user:pass@localhost:8000", client_cert=None, client_key=None)
+        client = KeaHTTPClient(target="http://user:pass@localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
 
         # Check that auth was passed to requests.post
         call_args = mock_post.call_args_list[0]
@@ -348,6 +434,8 @@ class TestKeaHTTPClientLoadSubnets(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertEqual(len(client.subnets), 2)
         self.assertIn(1, client.subnets)
@@ -375,6 +463,8 @@ class TestKeaHTTPClientLoadSubnets(unittest.TestCase):
         mock_post.side_effect = [config_response, subnets_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         self.assertEqual(len(client.subnets6), 2)
         self.assertIn(10, client.subnets6)
@@ -389,6 +479,8 @@ class TestKeaHTTPClientLoadSubnets(unittest.TestCase):
         mock_post.side_effect = [config_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+        client.load_modules()
+        client.load_subnets()
 
         # Only one POST call should have been made (for config-get,
         # not subnets)
@@ -414,7 +506,7 @@ class TestKeaHTTPClientStats(unittest.TestCase):
             {"result": 0, "arguments": {"pkt4-received": [[100, "2024-01-01"]], "pkt4-ack-sent": [[50, "2024-01-01"]]}}
         ]
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
 
@@ -438,7 +530,7 @@ class TestKeaHTTPClientStats(unittest.TestCase):
         stats_response = Mock()
         stats_response.json.return_value = [{"result": 0, "arguments": {"pkt6-received": [[200, "2024-01-01"]]}}]
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
 
@@ -485,7 +577,7 @@ class TestKeaHTTPClientStats(unittest.TestCase):
             {"result": 0, "arguments": {"ncr-received": [[50, "2024-01-01"]]}},
         ]
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
 
@@ -509,7 +601,7 @@ class TestKeaHTTPClientStats(unittest.TestCase):
         stats_response = Mock()
         stats_response.json.return_value = [{"result": 0, "arguments": {}}]
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://admin:secret@localhost:8000", client_cert=None, client_key=None)
 
@@ -533,7 +625,7 @@ class TestKeaHTTPClientStats(unittest.TestCase):
         stats_response = Mock()
         stats_response.json.return_value = [{"result": 0, "arguments": {}}]
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_response, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None, timeout=20)
 
@@ -554,8 +646,9 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
         error_response.raise_for_status.side_effect = requests.HTTPError("500 Server Error")
         mock_post.return_value = error_response
 
+        client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
         with self.assertRaises(requests.HTTPError):
-            KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+            client.load_modules()
 
     @patch("kea_exporter.http.requests.post")
     def test_stats_raises_on_http_error(self, mock_post):
@@ -569,14 +662,10 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
         subnets_response.raise_for_status.return_value = None
 
         # subnets reload succeeds, but stats call fails
-        subnets_reload = Mock()
-        subnets_reload.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-        subnets_reload.raise_for_status.return_value = None
-
         stats_response = Mock()
         stats_response.raise_for_status.side_effect = requests.HTTPError("503 Service Unavailable")
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_reload, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
 
@@ -591,8 +680,9 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
         mock_response.json.return_value = [{"arguments": {}}]
         mock_post.return_value = mock_response
 
+        client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
         with self.assertRaises(ValueError) as ctx:
-            KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+            client.load_modules()
         self.assertIn("malformed response", str(ctx.exception))
 
     @patch("kea_exporter.http.requests.post")
@@ -603,8 +693,9 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
         mock_response.json.return_value = [{"result": 1, "text": "config not found"}]
         mock_post.return_value = mock_response
 
+        client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
         with self.assertRaises(ValueError) as ctx:
-            KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
+            client.load_modules()
         self.assertIn("config not found", str(ctx.exception))
 
     @patch("kea_exporter.http.requests.post")
@@ -618,16 +709,12 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
         subnets_response.raise_for_status.return_value = None
         subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
-        subnets_reload = Mock()
-        subnets_reload.raise_for_status.return_value = None
-        subnets_reload.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-
         # Stats entry missing "result" key
         stats_response = Mock()
         stats_response.raise_for_status.return_value = None
         stats_response.json.return_value = [{"arguments": {}}]
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_reload, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
         with self.assertRaises(ValueError):
@@ -644,16 +731,12 @@ class TestKeaHTTPClientErrorHandling(unittest.TestCase):
         subnets_response.raise_for_status.return_value = None
         subnets_response.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 
-        subnets_reload = Mock()
-        subnets_reload.raise_for_status.return_value = None
-        subnets_reload.json.return_value = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-
         # Empty stats response — no entries for any module
         stats_response = Mock()
         stats_response.raise_for_status.return_value = None
         stats_response.json.return_value = []
 
-        mock_post.side_effect = [config_response, subnets_response, subnets_reload, stats_response]
+        mock_post.side_effect = [config_response, subnets_response, stats_response]
 
         client = KeaHTTPClient(target="http://localhost:8000", client_cert=None, client_key=None)
         with self.assertRaises(ValueError) as ctx:
