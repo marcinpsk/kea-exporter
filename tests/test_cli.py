@@ -6,92 +6,26 @@ import os
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from wsgiref.util import setup_testing_defaults
 
 from prometheus_client import CollectorRegistry
 
-from kea_exporter.cli import Timer, cli
+from kea_exporter.cli import cli
+from tests.support import InMemoryTarget, exporter_with
 
 
-class TestTimer(unittest.TestCase):
-    """Test Timer class"""
+class _CapturingHTTPServer:
+    def __init__(self):
+        self.app = None
 
-    @patch("kea_exporter.cli.time.time")
-    def test_timer_init(self, mock_time):
-        """Test Timer initialization"""
-        mock_time.return_value = 100.0  # Fake starting time
-        timer = Timer()
-        self.assertIsNotNone(timer.start_time)
-        self.assertEqual(timer.start_time, 100.0)
+    def set_app(self, app):
+        self.app = app
 
-    @patch("kea_exporter.cli.time.time")
-    def test_timer_reset(self, mock_time):
-        """Test Timer reset"""
-        # Start with initial time
-        mock_time.return_value = 100.0
-        timer = Timer()
-        original_start = timer.start_time
+    def shutdown(self):
+        pass
 
-        # Advance time and reset
-        mock_time.return_value = 100.05  # 50ms later
-        timer.reset()
-
-        self.assertNotEqual(timer.start_time, original_start)
-        self.assertGreater(timer.start_time, original_start)
-        self.assertEqual(timer.start_time, 100.05)
-
-    @patch("kea_exporter.cli.time.time")
-    def test_timer_time_elapsed(self, mock_time):
-        """Test time_elapsed calculation"""
-        # Start at time 100.0
-        mock_time.return_value = 100.0
-        timer = Timer()
-
-        # Advance time by 50ms
-        mock_time.return_value = 100.05
-        elapsed = timer.time_elapsed()
-
-        self.assertAlmostEqual(elapsed, 0.05, places=7)
-
-    @patch("kea_exporter.cli.time.time")
-    def test_timer_time_elapsed_increases(self, mock_time):
-        """Test that time_elapsed increases over time"""
-        # Start at time 100.0
-        mock_time.return_value = 100.0
-        timer = Timer()
-
-        # First check at 100.01 (10ms elapsed)
-        mock_time.return_value = 100.01
-        elapsed1 = timer.time_elapsed()
-
-        # Second check at 100.03 (30ms elapsed)
-        mock_time.return_value = 100.03
-        elapsed2 = timer.time_elapsed()
-
-        self.assertGreater(elapsed2, elapsed1)
-        self.assertAlmostEqual(elapsed1, 0.01, places=7)
-        self.assertAlmostEqual(elapsed2, 0.03, places=7)
-
-    @patch("kea_exporter.cli.time.time")
-    def test_timer_reset_resets_elapsed(self, mock_time):
-        """Test that reset resets the elapsed time"""
-        # Start at time 100.0
-        mock_time.return_value = 100.0
-        timer = Timer()
-
-        # Advance time by 50ms
-        mock_time.return_value = 100.05
-        elapsed_before = timer.time_elapsed()
-
-        # Reset at 100.10 (should be new start time)
-        mock_time.return_value = 100.10
-        timer.reset()
-
-        # Check elapsed immediately after reset (should be 0)
-        elapsed_after = timer.time_elapsed()
-
-        self.assertLess(elapsed_after, elapsed_before)
-        self.assertAlmostEqual(elapsed_after, 0.0, places=7)
-        self.assertAlmostEqual(elapsed_before, 0.05, places=7)
+    def server_close(self):
+        pass
 
 
 class TestCLIOptions(unittest.TestCase):
@@ -366,49 +300,70 @@ class TestCLIWSGIApp(unittest.TestCase):
         self.patcher1.stop()
         self.patcher2.stop()
 
-    @patch("kea_exporter.cli.Exporter")
-    @patch("kea_exporter.cli.start_http_server")
-    @patch("kea_exporter.cli.make_wsgi_app")
-    @patch("kea_exporter.cli.time.sleep")
-    def test_wsgi_app_updates_on_interval(self, mock_sleep, mock_wsgi, mock_http_server, mock_exporter):
-        """Test that WSGI app calls update based on interval"""
-        mock_sleep.side_effect = KeyboardInterrupt
-
-        mock_exporter_instance = Mock()
-        mock_exporter_instance.targets = [Mock()]
-        mock_exporter.return_value = mock_exporter_instance
-
-        mock_httpd = Mock()
-        mock_http_server.return_value = (mock_httpd, Mock())
-
-        # Mock the WSGI app
-        mock_wsgi_func = Mock(return_value=[b"metrics"])
-        mock_wsgi.return_value = mock_wsgi_func
-
+    def _start_wsgi_app(self, interval):
         from click.testing import CliRunner
 
-        runner = CliRunner()
+        clock = {"now": 1000.0}
+        target = InMemoryTarget()
+        httpd = _CapturingHTTPServer()
 
-        result = runner.invoke(cli, ["--interval", "0", "http://localhost:8000"])
+        def exporter_factory(**_kwargs):
+            return exporter_with(self.registry, target)
+
+        clock_patcher = patch("kea_exporter.cli.time.time", side_effect=lambda: clock["now"])
+        clock_patcher.start()
+        self.addCleanup(clock_patcher.stop)
+
+        with (
+            patch("kea_exporter.cli.Exporter", new=exporter_factory),
+            patch("kea_exporter.cli.start_http_server", return_value=(httpd, None)),
+            patch("kea_exporter.cli.time.sleep", side_effect=KeyboardInterrupt),
+        ):
+            result = CliRunner().invoke(cli, ["--interval", str(interval), "http://localhost:8000"])
 
         self.assertEqual(result.exit_code, 0)
-        # Check that set_app was called
-        mock_httpd.set_app.assert_called_once()
+        self.assertIsNotNone(httpd.app)
+        return httpd.app, target, clock
 
-        # Get the local_wsgi_app function that was set
-        wsgi_app = mock_httpd.set_app.call_args[0][0]
-
-        # Call the app to test interval logic
+    def _scrape(self, app):
         environ = {}
-        start_response = Mock()
+        setup_testing_defaults(environ)
+        response = {}
 
-        # First call should trigger update (elapsed >= interval)
-        wsgi_app(environ, start_response)
-        # Second call should also trigger with interval=0
-        wsgi_app(environ, start_response)
+        def start_response(status, headers, exc_info=None):
+            response["status"] = status
+            response["headers"] = headers
 
-        # With interval=0, update should be called every time
-        self.assertGreaterEqual(mock_exporter_instance.update.call_count, 2)
+        body = b"".join(app(environ, start_response))
+        self.assertEqual(response["status"], "200 OK")
+        self.assertTrue(body)
+
+    def test_wsgi_app_skips_scrapes_until_the_interval_elapses_and_resets_the_timestamp(self):
+        app, target, clock = self._start_wsgi_app(60)
+
+        self._scrape(app)
+        # The startup skip is current behavior, but it is questionable.
+        self.assertEqual(target.calls, 0)
+
+        clock["now"] = 1059.0
+        self._scrape(app)
+        self.assertEqual(target.calls, 0)
+
+        clock["now"] = 1060.0
+        self._scrape(app)
+        self.assertEqual(target.calls, 1)
+
+        self._scrape(app)
+        self.assertEqual(target.calls, 1)
+
+    def test_wsgi_app_scrapes_on_every_request_when_the_interval_is_zero(self):
+        app, target, _clock = self._start_wsgi_app(0)
+
+        self._scrape(app)
+        self.assertEqual(target.calls, 1)
+
+        self._scrape(app)
+        self.assertEqual(target.calls, 2)
 
 
 class TestCLIEnvironmentVariables(unittest.TestCase):

@@ -10,18 +10,6 @@ from kea_exporter import __project__, __version__
 from kea_exporter.exporter import Exporter
 
 
-class Timer:
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.start_time = time.time()
-
-    def time_elapsed(self):
-        now_time = time.time()
-        return now_time - self.start_time
-
-
 @click.command()
 @click.option(
     "-a",
@@ -122,15 +110,16 @@ def cli(port, address, interval, **kwargs: Any):
 
     httpd, _ = start_http_server(port, address)
 
-    t = Timer()
+    last_update = time.time()
 
     def local_wsgi_app(registry):
         func = make_wsgi_app(registry, False)
 
         def app(environ, start_response):
-            if t.time_elapsed() >= interval:
+            nonlocal last_update
+            if time.time() - last_update >= interval:
                 exporter.update()
-                t.reset()
+                last_update = time.time()
             output_array = func(environ, start_response)
             return output_array
 
