@@ -101,6 +101,7 @@ Features
 - DHCP4 & DHCP6 Metrics (tested against Kea 3.0, should work with 2.4+)
 - DDNS Metrics
 - Subnets inside shared-networks
+- Address pools and prefix delegation pools, reported separately
 - Configuration and statistics via HTTP/HTTPS API or Unix domain socket
 - Multiple Kea targets with per-server labels
 - Automatic retry of failed targets on each scrape (up to 10 attempts)
@@ -115,6 +116,107 @@ Testing Status
 This fork is actively tested against **Kea 3.0** using **HTTP/HTTPS only**
 (no Control Agent). Unix domain socket support is maintained but not currently
 tested — it should still work but is not guaranteed.
+
+
+Metrics
+-------
+
+Metric names and their labels are derived from the catalogue in
+``kea_exporter/catalogue.py``, which records the scope each Kea statistic is
+reported at. A statistic read at subnet scope leaves the deeper labels empty,
+so a subnet total and a pool total remain distinct series.
+
+.. metrics-table-start
+
+DHCPv4
+//////
+
+============================================  ==================================
+Metric                                        Labels
+============================================  ==================================
+kea_dhcp4_addresses_assigned_total            server, subnet, subnet_id, pool
+kea_dhcp4_addresses_declined_reclaimed_total  server, subnet, subnet_id, pool
+kea_dhcp4_addresses_declined_total            server, subnet, subnet_id, pool
+kea_dhcp4_addresses_reclaimed_total           server, subnet, subnet_id, pool
+kea_dhcp4_addresses_total                     server, subnet, subnet_id, pool
+kea_dhcp4_allocations_failed_total            server, subnet, subnet_id, context
+kea_dhcp4_leases_reused_total                 server, subnet, subnet_id
+kea_dhcp4_packets_received_total              server, operation
+kea_dhcp4_packets_sent_total                  server, operation
+kea_dhcp4_reservation_conflicts_total         server, subnet, subnet_id
+============================================  ==================================
+
+DHCPv6
+//////
+
+============================================  ========================================
+Metric                                        Labels
+============================================  ========================================
+kea_dhcp6_addresses_declined_reclaimed_total  server, subnet, subnet_id, pool
+kea_dhcp6_addresses_declined_total            server, subnet, subnet_id, pool
+kea_dhcp6_addresses_reclaimed_total           server, subnet, subnet_id, pool, pd_pool
+kea_dhcp6_allocations_failed_total            server, subnet, subnet_id, context
+kea_dhcp6_na_assigned_total                   server, subnet, subnet_id, pool
+kea_dhcp6_na_registered_total                 server, subnet, subnet_id
+kea_dhcp6_na_reuses_total                     server, subnet, subnet_id
+kea_dhcp6_na_total                            server, subnet, subnet_id, pool
+kea_dhcp6_packets_received_dhcp4_total        server, operation
+kea_dhcp6_packets_received_total              server, operation
+kea_dhcp6_packets_sent_dhcp4_total            server, operation
+kea_dhcp6_packets_sent_total                  server, operation
+kea_dhcp6_pd_assigned_total                   server, subnet, subnet_id, pd_pool
+kea_dhcp6_pd_reuses_total                     server, subnet, subnet_id
+kea_dhcp6_pd_total                            server, subnet, subnet_id, pd_pool
+============================================  ========================================
+
+DDNS
+////
+
+=================================  ===========
+Metric                             Labels
+=================================  ===========
+kea_ddns_key_update_error_total    server, key
+kea_ddns_key_update_sent_total     server, key
+kea_ddns_key_update_success_total  server, key
+kea_ddns_key_update_timeout_total  server, key
+kea_ddns_ncr_error_total           server
+kea_ddns_ncr_invalid_total         server
+kea_ddns_ncr_received_total        server
+kea_ddns_queue_full_total          server
+kea_ddns_update_error_total        server
+kea_ddns_update_sent_total         server
+kea_ddns_update_signed_total       server
+kea_ddns_update_success_total      server
+kea_ddns_update_timeout_total      server
+kea_ddns_update_unsigned_total     server
+=================================  ===========
+
+.. metrics-table-end
+
+Prefix Delegation
+/////////////////
+
+Kea reports IA_PD statistics under ``subnet[N].pd-pool[M]``, a scope distinct
+from the ``pool[M]`` used for address pools. Prefix pools appear in the
+``pd_pool`` label, written as ``prefix/prefix-len-delegated-len``, for example
+``2001:db8:1::/48-64``. The delegated length is part of the identifier because
+Kea permits several pd-pools to share a prefix and differ only in it.
+
+``reclaimed-leases`` is the one statistic Kea reports under both pool kinds, so
+``kea_dhcp6_addresses_reclaimed_total`` carries both ``pool`` and ``pd_pool``.
+Exactly one of the two is set on any series.
+
+Upgrading from 0.9
+//////////////////
+
+- ``kea_dhcp6_pd_assigned_total``, ``kea_dhcp6_pd_total`` and
+  ``kea_dhcp6_addresses_reclaimed_total`` gained a ``pd_pool`` label. Queries
+  that aggregate, such as ``sum by (subnet)``, are unaffected. Queries that
+  match an exact label set need the new label added.
+- ``kea_dhcp6_reservation_conflicts_total`` was removed. Its only source,
+  ``v6-reservation-conflicts``, is not a Kea statistic in any version, so the
+  metric never had a value. Reservation conflicts are tracked for DHCPv4 only,
+  under ``kea_dhcp4_reservation_conflicts_total``.
 
 
 Known Limitations
