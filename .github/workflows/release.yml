@@ -24,7 +24,9 @@ jobs:
       released: ${{ steps.release.outputs.released }}
       tag: ${{ steps.release.outputs.tag }}
     steps:
-      - name: Checkout
+      # persist-credentials must stay on: semantic-release pushes the version
+      # commit and tag back to this branch using RELEASE_TOKEN.
+      - name: Checkout # zizmor: ignore[artipacked]
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ github.ref_name }}

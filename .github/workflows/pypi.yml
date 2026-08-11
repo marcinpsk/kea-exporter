@@ -21,10 +21,16 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: astral-sh/setup-uv@v7
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          # This job publishes to PyPI, so never let a restored cache reach the
+          # build. setup-uv's "auto" already skips the cache on tag pushes, but
+          # this workflow is also reachable via workflow_call.
+          enable-cache: false
       - name: Build package
         run: uv build
       - name: Publish package distributions to PyPI

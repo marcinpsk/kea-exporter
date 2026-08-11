@@ -26,3 +26,9 @@ repos:
     rev: v0.23.2
     hooks:
       - id: markdownlint-cli2
+
+  # Keep in step with the pinned zizmor in [dependency-groups].dev.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.29.0
+    hooks:
+      - id: zizmor
