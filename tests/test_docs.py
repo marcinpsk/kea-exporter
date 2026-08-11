@@ -102,3 +102,24 @@ def test_frontier_query_does_not_list_the_whole_repository():
         "children first, then inspect each with `gh issue view`"
     )
     assert "gh issue view <child> --json" in line, "the frontier query must inspect each child individually"
+
+
+def test_frontier_query_reads_every_child_and_its_state():
+    """A map larger than one page, or a closed child, must not derail the frontier.
+
+    The sub-issues endpoint pages at 30, so an unpaginated call silently
+    truncates a large map. Selecting the first *open* child also requires
+    asking for state, which is not returned unless requested.
+    """
+    line = bullet(ISSUE_TRACKER.read_text(), "Frontier query")
+
+    assert "--paginate" in line and "per_page=100" in line, (
+        "the sub-issues enumeration is unpaginated, so a map with more than 30 children is silently truncated"
+    )
+
+    fields = re.search(r"gh issue view <child> --json ([a-zA-Z,]+)", line)
+    assert fields, "the frontier query must inspect each child with `gh issue view <child> --json`"
+    assert "state" in fields.group(1).split(","), (
+        "the query selects the first open child but never requests `state`, "
+        f"so openness cannot be read; requested fields are {fields.group(1)}"
+    )
