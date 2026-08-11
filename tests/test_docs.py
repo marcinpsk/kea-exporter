@@ -88,6 +88,31 @@ def test_external_pr_filter_excludes_insiders_rather_than_listing_outsiders():
     )
 
 
+def test_list_issues_does_not_read_comment_bodies():
+    """`gh issue list` returns at most 100 comments per issue; `gh issue view` paginates.
+
+    Both commands expose `comments` as a plain array, so `.comments[].body`
+    reads clean and truncates in silence. Only the count gives it away.
+    """
+    line = bullet(ISSUE_TRACKER.read_text(), "List issues")
+
+    listing = re.search(r"`(gh issue list[^`]*)`", line)
+    assert listing, "the List issues bullet no longer shows a `gh issue list` command"
+    command = listing.group(1)
+
+    fields = re.search(r"--json ([a-zA-Z,]+)", command)
+    assert fields, "the documented `gh issue list` selects no --json fields"
+    assert "comments" not in fields.group(1).split(","), (
+        "`gh issue list` caps each issue at 100 comments, so listing them here "
+        "drops the rest without warning; read bodies with `gh issue view`"
+    )
+    assert ".comments[" not in command, f"the list command still transforms comment bodies: {command!r}"
+
+    assert "gh issue view <number> --json comments" in line, (
+        "the bullet must point at `gh issue view` for comment bodies, which pages past 100"
+    )
+
+
 def test_frontier_query_does_not_list_the_whole_repository():
     """gh issue list is repo-wide and caps at 30, so it cannot walk a map's children in order.
 
