@@ -36,11 +36,6 @@ class KeaSocketClient:
         """
         super().__init__()
 
-        if not os.access(sock_path, os.F_OK):
-            raise FileNotFoundError(f"Unix domain socket does not exist at {sock_path}")
-        if not os.access(sock_path, os.R_OK | os.W_OK):
-            raise PermissionError(f"No read/write permissions on Unix domain socket at {sock_path}")
-
         self.sock_path = os.path.abspath(sock_path)
         # Use socket path as server identifier
         self._server_id = self.sock_path
@@ -51,6 +46,21 @@ class KeaSocketClient:
         self.subnets = None
         self.subnet_missing_info_sent = set()
         self.dhcp_version = None
+
+    @property
+    def server_id(self) -> str:
+        return self._server_id
+
+    def _check_socket(self):
+        """Fail with the reason rather than letting connect() report a bare error.
+
+        Checked per scrape, not once at construction: Kea may create the socket
+        after the exporter starts, and the scrape loop retries.
+        """
+        if not os.access(self.sock_path, os.F_OK):
+            raise FileNotFoundError(f"Unix domain socket does not exist at {self.sock_path}")
+        if not os.access(self.sock_path, os.R_OK | os.W_OK):
+            raise PermissionError(f"No read/write permissions on Unix domain socket at {self.sock_path}")
 
     def query(self, command):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -91,6 +101,7 @@ class KeaSocketClient:
                 - arguments (dict): Statistics from statistic-get-all.
                 - subnets (dict): Subnet ID to subnet config mapping.
         """
+        self._check_socket()
         self.reload()
 
         arguments = self.query("statistic-get-all").get("arguments", {})

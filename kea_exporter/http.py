@@ -100,9 +100,11 @@ class KeaHTTPClient:
         self.modules = []
         self.subnets = {}
         self.subnets6 = {}
+        self._discovered = False
 
-        self.load_modules()
-        self.load_subnets()
+    @property
+    def server_id(self) -> str:
+        return self._server_id
 
     def load_modules(self):
         """
@@ -247,17 +249,25 @@ class KeaHTTPClient:
                 - subnets (dict): mapping of subnet id to subnet definition
                   (empty for DDNS).
         """
-        # Reload subnets on every scrape to pick up runtime config changes
-        # (e.g. subnets added/removed via config-set). This costs one extra
-        # HTTP request per scrape but avoids stale subnet labels.
-        # Best-effort: don't abort the scrape if subnet refresh fails.
-        try:
+        if not self._discovered:
+            # First scrape: nothing can be read until the modules are known, so
+            # a failure here belongs to the caller.
+            self.load_modules()
             self.load_subnets()
-        except Exception as e:
-            click.echo(
-                f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(e).__name__}: {e}",
-                err=True,
-            )
+            self._discovered = True
+        else:
+            # Reload subnets on every scrape to pick up runtime config changes
+            # (e.g. subnets added/removed via config-set). This costs one extra
+            # HTTP request per scrape but avoids stale subnet labels.
+            # Best-effort: don't abort the scrape if subnet refresh fails.
+            try:
+                self.load_subnets()
+            except Exception as e:
+                click.echo(
+                    f"Warning: failed to refresh subnets for {self._server_id}, "
+                    f"using cached data: {type(e).__name__}: {e}",
+                    err=True,
+                )
         r = requests.post(
             self._target,
             cert=self._cert,
