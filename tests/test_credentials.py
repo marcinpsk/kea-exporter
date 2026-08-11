@@ -78,27 +78,32 @@ def kea(no_proxy):
 
 @pytest.fixture
 def kea6(no_proxy):
-    server = serve(socket.AF_INET6, "::1")
+    try:
+        server = serve(socket.AF_INET6, "::1")
+    except OSError as ex:
+        pytest.skip(f"no IPv6 loopback to bind: {ex}")
     yield server
     server.shutdown()
     server.server_close()
 
 
 @pytest.mark.parametrize(
-    "userinfo",
+    ("target", "expected"),
     [
-        f"user:{PASSWORD}@",
+        (f"http://user:{PASSWORD}@kea.local:8000", "http://kea.local:8000"),
         # urlparse reports an empty username here, which is falsy.
-        f":{PASSWORD}@",
+        (f"http://:{PASSWORD}@kea.local:8000", "http://kea.local:8000"),
+        # urlparse reports an IPv6 host without its brackets.
+        (f"http://user:{PASSWORD}@[::1]:8000", "http://[::1]:8000"),
     ],
 )
-def test_password_never_reaches_the_initialisation_failure_message(registry, capsys, userinfo):
-    Exporter(targets=[f"http://{userinfo}kea.local:8000"], registry=registry, **CERT_WITHOUT_KEY)
+def test_password_never_reaches_the_initialisation_failure_message(registry, capsys, target, expected):
+    Exporter(targets=[target], registry=registry, **CERT_WITHOUT_KEY)
 
     out = capsys.readouterr().out
     assert "Failed to initialize target" in out, out
     assert PASSWORD not in out, out
-    assert "http://kea.local:8000" in out, out
+    assert expected in out, out
 
 
 @pytest.mark.parametrize(

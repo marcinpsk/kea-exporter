@@ -377,9 +377,8 @@ def _safe_target(target: str) -> str:
         # A URL may carry a password with no username, where username is "".
         if not parsed.username and not parsed.password:
             return target
-        host = parsed.hostname
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-        return f"{parsed.scheme}://{host}{parsed.path}"
+        # Cut the userinfo off the netloc; parsed.hostname would drop the
+        # brackets from an IPv6 host. Same reconstruction as KeaHTTPClient.
+        return f"{parsed.scheme}://{parsed.netloc.rpartition('@')[2]}{parsed.path}"
     except Exception:
         return target  # non-URL paths (UDS socket paths) pass through unchanged

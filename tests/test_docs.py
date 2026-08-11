@@ -69,21 +69,28 @@ def test_documented_gh_json_fields_exist(path):
         assert not unknown, f"{path.relative_to(ROOT)} documents `gh {noun} {verb} --json` fields gh rejects: {unknown}"
 
 
-def test_adr_0001_does_not_reject_the_design_the_catalogue_uses():
-    """The exporter resolves a reading by an exact (statistic, scope) lookup.
+def test_adr_0001_states_the_scope_contract_the_exporter_implements():
+    """The ADR records why scope drives labels, so it has to match the exporter.
 
-    So an entry must declare every scope it is exported at, and an ADR calling
-    one scope per entry sufficient describes a different exporter than the one
-    that ships.
+    A reading resolves by an exact (statistic, scope) lookup, and a routine
+    global aggregate is suppressed without a report. An ADR that drops either
+    half describes a different exporter than the one that ships.
     """
     multi = [e for version in catalogue.CATALOGUE for e in catalogue.CATALOGUE[version] if len(e.scopes) > 1]
     assert multi, "no entry declares several scopes any more; this guard needs rewriting"
 
     text = ADR_SCOPE.read_text()
-    assert "deepest scope is enough" not in text, (
-        f"docs/adr/0001 records declaring one scope per entry as sufficient, but "
-        f"{len(multi)} entries declare several, such as {multi[0].statistic!r}"
-    )
+    required = {
+        "every scope at which the exporter exports": (
+            "the rule is the scopes the exporter exports, not the scopes Kea reports: "
+            f"{len(multi)} entries declare several, such as {multi[0].statistic!r}, while Kea "
+            "also reports aggregates the exporter suppresses"
+        ),
+        "exact `(statistic, scope)` lookup": "the ADR must say why one scope per entry cannot work",
+        "suppressed without a report": "the ADR must keep the exception for routine global aggregates",
+    }
+    for phrase, reason in required.items():
+        assert phrase in text, f"docs/adr/0001 no longer states {phrase!r}: {reason}"
 
 
 def test_external_pr_filter_excludes_insiders_rather_than_listing_outsiders():

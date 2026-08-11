@@ -219,12 +219,6 @@ Upgrading from 0.9
   ``v6-reservation-conflicts``, is not a Kea statistic in any version, so the
   metric never had a value. Reservation conflicts are tracked for DHCPv4 only,
   under ``kea_dhcp4_reservation_conflicts_total``.
-- The ``server`` label no longer carries credentials for a target written as
-  ``http://:password@host`` or ``http://user@host``. Only ``user:password@``
-  was stripped before, so the other two forms published the userinfo, and a
-  password with them. Rotate any password that a target URL exposed this way.
-  Authentication is unchanged: a username with no password never authenticated
-  and still does not.
 - A target that carries credentials now keeps its host exactly as written.
   Stripping the credentials used to rebuild the host, which lower-cased it and
   dropped the brackets from an IPv6 literal. So ``server`` gains the original

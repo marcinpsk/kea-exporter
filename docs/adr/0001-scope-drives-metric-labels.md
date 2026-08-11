@@ -1,6 +1,6 @@
 # Statistic scope drives metric labels
 
-Every catalogue entry declares every scope Kea reports its statistic at, and the metric's label set is derived from those scopes rather than written by hand. Global scope gives `server`, subnet scope adds `subnet` and `subnet_id`, pool and pd-pool scope add `pool` and `pd_pool`. Labels that are not a function of scope, such as `operation` and `context`, stay on the entry as extra labels.
+Every catalogue entry declares every scope at which the exporter exports its statistic, and the metric's label set is derived from those scopes rather than written by hand. Kea also reports its statistics at scopes no entry declares, which the exporter suppresses or reports as described below. Global scope gives `server`, subnet scope adds `subnet` and `subnet_id`, pool and pd-pool scope add `pool` and `pd_pool`. Labels that are not a function of scope, such as `operation` and `context`, stay on the entry as extra labels.
 
 ## Considered options
 
@@ -10,7 +10,7 @@ Every catalogue entry declares every scope Kea reports its statistic at, and the
 
 ## Consequences
 
-A reading at a scope the entry does not declare is skipped and reported once, instead of being written to a metric that has no label to distinguish it. Before this decision, two pools reporting the same subnet-scoped statistic silently overwrote each other, last write winning, with nothing logged. Kea has not reported such a statistic since pool scope arrived in 2.4.0, so the fault was latent rather than live.
+A reading at a scope the entry does not declare is skipped and reported once, instead of being written to a metric that has no label to distinguish it. Routine global aggregates are the exception, covered in the next paragraph. Before this decision, two pools reporting the same subnet-scoped statistic silently overwrote each other, last write winning, with nothing logged. Kea has not reported such a statistic since pool scope arrived in 2.4.0, so the fault was latent rather than live.
 
 Global readings of a statistic declared at subnet scope or deeper are suppressed without a report, because Kea emits them routinely as aggregates. This replaces a hand-maintained list of 22 statistic names per daemon, which had to be extended by hand whenever Kea added a global aggregate. Kea 3.2 adding global `assigned-addresses`, `assigned-nas`, and `assigned-pds` is the case that motivated it.
 
