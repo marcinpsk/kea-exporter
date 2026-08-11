@@ -10,6 +10,7 @@ real HTTP server on localhost that answers the commands Kea would.
 
 import base64
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -54,10 +55,30 @@ def registry():
 
 
 @pytest.fixture
-def kea():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), KeaHandler)
+def no_proxy(monkeypatch):
+    """Keep an ambient proxy configuration out of a loopback test."""
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+
+
+def serve(family, host):
+    server = type("Server", (ThreadingHTTPServer,), {"address_family": family})((host, 0), KeaHandler)
     server.seen_auth = []
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.fixture
+def kea(no_proxy):
+    server = serve(socket.AF_INET, "127.0.0.1")
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
+def kea6(no_proxy):
+    server = serve(socket.AF_INET6, "::1")
     yield server
     server.shutdown()
     server.server_close()
@@ -100,6 +121,18 @@ def test_password_never_reaches_the_exported_metrics(registry, kea, userinfo, ex
     # Stripping the URL must not cost the authentication it carried.
     expected = "Basic " + base64.b64encode(expected_auth.encode()).decode()
     assert kea.seen_auth and set(kea.seen_auth) == {expected}, kea.seen_auth
+
+
+def test_ipv6_target_keeps_its_brackets_when_credentials_are_stripped(registry, kea6):
+    """urlparse reports an IPv6 host without its brackets, and requests then
+    rejects the rebuilt URL outright: InvalidURL: Failed to parse."""
+    port = kea6.server_address[1]
+    exporter = Exporter(targets=[f"http://:{PASSWORD}@[::1]:{port}"], registry=registry)
+    exporter.update()
+
+    exposition = generate_latest(registry).decode()
+    assert PASSWORD not in exposition, exposition
+    assert f'server="http://[::1]:{port}"' in exposition, exposition
 
 
 def test_username_without_a_password_is_stripped_without_authenticating(registry, kea):

@@ -63,10 +63,10 @@ class KeaHTTPClient:
             self._auth = (
                 (unquote(parsed.username or ""), unquote(parsed.password)) if parsed.password is not None else None
             )
-            # Remove credentials from URL for actual requests and server ID
-            netloc_without_auth = parsed.hostname
-            if parsed.port:
-                netloc_without_auth = f"{netloc_without_auth}:{parsed.port}"
+            # Cut the userinfo off the netloc rather than rebuilding it from
+            # parsed.hostname, which drops the brackets from an IPv6 host and
+            # leaves a URL requests refuses to parse.
+            netloc_without_auth = parsed.netloc.rpartition("@")[2]
             self._target = urlunparse(
                 (parsed.scheme, netloc_without_auth, parsed.path, parsed.params, parsed.query, parsed.fragment)
             )

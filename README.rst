@@ -225,6 +225,12 @@ Upgrading from 0.9
   password with them. Rotate any password that a target URL exposed this way.
   Authentication is unchanged: a username with no password never authenticated
   and still does not.
+- A target that carries credentials now keeps its host exactly as written.
+  Stripping the credentials used to rebuild the host, which lower-cased it and
+  dropped the brackets from an IPv6 literal. So ``server`` gains the original
+  case for a mixed-case host, and an IPv6 target with credentials, such as
+  ``http://user:password@[::1]:8000``, scrapes at all: the rebuilt URL was one
+  ``requests`` refused to parse.
 
 
 Known Limitations
