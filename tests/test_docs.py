@@ -18,17 +18,6 @@ AGENT_DOCS = sorted((ROOT / "docs" / "agents").glob("*.md")) + [ROOT / "AGENTS.m
 GH_JSON_COMMAND = re.compile(r"gh (issue|pr) (list|view|status)\b[^`\n]*?--json ([a-zA-Z][a-zA-Z,]*)")
 
 
-def opening_fences(text):
-    """Yield (line number, info string) for each opening code fence."""
-    inside = False
-    for number, line in enumerate(text.splitlines(), start=1):
-        if not line.lstrip().startswith("```"):
-            continue
-        if not inside:
-            yield number, line.strip().removeprefix("```").strip()
-        inside = not inside
-
-
 def test_documented_coverage_command_matches_ci():
     """tests/README.md must not tell contributors to run a weaker gate than CI."""
     workflow = (ROOT / ".github" / "workflows" / "checks.yml").read_text()
@@ -43,13 +32,6 @@ def test_documented_coverage_command_matches_ci():
         f"documented coverage command {documented.group(0)!r} omits the CI gate "
         f"--cov-fail-under={ci_threshold.group(1)}"
     )
-
-
-@pytest.mark.parametrize("path", AGENT_DOCS, ids=lambda p: p.name)
-def test_agent_doc_code_fences_declare_a_language(path):
-    """A fence without a language renders unhighlighted and trips markdownlint MD040."""
-    bare = [number for number, info in opening_fences(path.read_text()) if not info]
-    assert not bare, f"{path.relative_to(ROOT)} has code fences without a language at line(s) {bare}"
 
 
 @pytest.mark.skipif(shutil.which("gh") is None, reason="gh CLI not installed")

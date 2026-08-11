@@ -8,8 +8,10 @@ repos:
       - id: check-toml
       - id: check-added-large-files
 
+  # Keep in step with the pinned ruff in [dependency-groups].dev, so the local
+  # gate and CI cannot disagree.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.8
+    rev: v0.16.0
     hooks:
       - id: ruff
         args: [--fix]
@@ -19,3 +21,8 @@ repos:
     rev: v8.18.1
     hooks:
       - id: gitleaks
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.2
+    hooks:
+      - id: markdownlint-cli2
