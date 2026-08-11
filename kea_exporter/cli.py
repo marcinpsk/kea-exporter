@@ -110,16 +110,16 @@ def cli(port, address, interval, **kwargs: Any):
 
     httpd, _ = start_http_server(port, address)
 
-    last_update = time.time()
+    last_update = time.monotonic()
 
     def local_wsgi_app(registry):
         func = make_wsgi_app(registry, False)
 
         def app(environ, start_response):
             nonlocal last_update
-            if time.time() - last_update >= interval:
+            if time.monotonic() - last_update >= interval:
                 exporter.update()
-                last_update = time.time()
+                last_update = time.monotonic()
             output_array = func(environ, start_response)
             return output_array
 

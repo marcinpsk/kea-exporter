@@ -300,7 +300,7 @@ class TestCLIWSGIApp(unittest.TestCase):
         self.patcher1.stop()
         self.patcher2.stop()
 
-    def _start_wsgi_app(self, interval):
+    def _start_wsgi_app(self, interval, wall_clock=None):
         from click.testing import CliRunner
 
         clock = {"now": 1000.0}
@@ -310,9 +310,13 @@ class TestCLIWSGIApp(unittest.TestCase):
         def exporter_factory(**_kwargs):
             return exporter_with(self.registry, target)
 
-        clock_patcher = patch("kea_exporter.cli.time.time", side_effect=lambda: clock["now"])
+        clock_patcher = patch("kea_exporter.cli.time.monotonic", side_effect=lambda: clock["now"])
         clock_patcher.start()
         self.addCleanup(clock_patcher.stop)
+        if wall_clock is not None:
+            wall_clock_patcher = patch("kea_exporter.cli.time.time", side_effect=lambda: wall_clock["now"])
+            wall_clock_patcher.start()
+            self.addCleanup(wall_clock_patcher.stop)
 
         with (
             patch("kea_exporter.cli.Exporter", new=exporter_factory),
@@ -354,6 +358,16 @@ class TestCLIWSGIApp(unittest.TestCase):
         self.assertEqual(target.calls, 1)
 
         self._scrape(app)
+        self.assertEqual(target.calls, 1)
+
+    def test_a_backwards_wall_clock_step_does_not_stall_scrapes(self):
+        wall_clock = {"now": 5000.0}
+        app, target, clock = self._start_wsgi_app(60, wall_clock)
+
+        clock["now"] = 1061.0
+        wall_clock["now"] = 1400.0
+        self._scrape(app)
+
         self.assertEqual(target.calls, 1)
 
     def test_wsgi_app_scrapes_on_every_request_when_the_interval_is_zero(self):
