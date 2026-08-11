@@ -23,6 +23,7 @@ from kea_exporter.catalogue import (
 GLOBAL = frozenset({Scope.GLOBAL})
 SUBNET = frozenset({Scope.SUBNET})
 POOL = frozenset({Scope.POOL})
+DDNS_KEY = frozenset({Scope.DDNS_KEY})
 
 
 def check(entries, documentation=None, never=frozenset()):
@@ -61,6 +62,24 @@ def test_entry_overriding_a_scope_label_is_rejected():
 def test_statistic_both_exported_and_never_exported_is_rejected():
     with pytest.raises(CatalogueError, match="both exported and never-exported"):
         check([Entry("a-stat", "a_total", GLOBAL)], never=frozenset({"a-stat"}))
+
+
+def test_entry_without_a_scope_is_rejected():
+    """index() keys on (statistic, scope), so a scopeless entry is never reachable."""
+    with pytest.raises(CatalogueError, match="no scopes"):
+        check([Entry("a-stat", "a_total", frozenset())])
+
+
+def test_duplicate_statistic_and_scope_is_rejected():
+    """index() keeps one entry per selector, so the loser's metric would stay empty."""
+    entries = [Entry("a-stat", "first_total", SUBNET), Entry("a-stat", "second_total", SUBNET)]
+    with pytest.raises(CatalogueError, match="duplicate statistic and scope"):
+        check(entries)
+
+
+def test_one_statistic_on_two_scopes_is_still_allowed():
+    """The duplicate check keys on the pair, so DDNS update-sent must survive it."""
+    check([Entry("update-sent", "update_sent_total", GLOBAL), Entry("update-sent", "key_total", DDNS_KEY)])
 
 
 def test_sibling_scopes_on_one_metric_are_allowed():

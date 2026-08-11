@@ -8,7 +8,7 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from kea_exporter import DHCPVersion
-from tests.support import exporter_with, stat, subnet4, subnet6
+from tests.support import exporter_with, samples, stat, subnet4, subnet6
 
 SERVER = "memory://kea"
 
@@ -90,6 +90,23 @@ def test_reclaimed_leases_distinguishes_pool_from_pd_pool(exporter, registry):
     assert (address_pool, prefix_pool) == (3, 4)
 
 
+def test_subnet_total_of_reclaimed_leases_leaves_both_pool_labels_empty(exporter, registry):
+    """Kea reports reclaimed-leases per subnet too, where neither pool label applies."""
+    subnets = {
+        1: subnet6(
+            1,
+            "2001:db8::/48",
+            pools=["2001:db8::1-2001:db8::ffff"],
+            pd_pools=[("2001:db8:1::", 48, 64)],
+        )
+    }
+
+    exporter.parse_metrics(SERVER, DHCPVersion.DHCP6, {"subnet[1].reclaimed-leases": stat(5)}, subnets)
+
+    labels = {"server": SERVER, "subnet": "2001:db8::/48", "subnet_id": "1", "pool": "", "pd_pool": ""}
+    assert registry.get_sample_value("kea_dhcp6_addresses_reclaimed_total", labels) == 5
+
+
 def test_pool_reading_of_subnet_scoped_statistic_is_skipped(exporter, registry, capsys):
     """Two pools must never collapse onto one subnet-scoped series.
 
@@ -136,7 +153,7 @@ def test_global_reading_of_subnet_scoped_statistic_is_silently_skipped(exporter,
         {},
     )
 
-    assert registry.get_sample_value("kea_dhcp4_addresses_total", {"server": SERVER}) is None
+    assert not samples(registry, "kea_dhcp4_addresses_total")
     assert capsys.readouterr().out == ""
 
 

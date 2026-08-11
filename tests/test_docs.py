@@ -11,9 +11,12 @@ from pathlib import Path
 
 import pytest
 
+from kea_exporter import catalogue
+
 ROOT = Path(__file__).resolve().parent.parent
 AGENT_DOCS = sorted((ROOT / "docs" / "agents").glob("*.md")) + [ROOT / "AGENTS.md"]
 ISSUE_TRACKER = ROOT / "docs" / "agents" / "issue-tracker.md"
+ADR_SCOPE = ROOT / "docs" / "adr" / "0001-scope-drives-metric-labels.md"
 
 # gh subcommands whose --json field list can be checked without network access.
 GH_JSON_COMMAND = re.compile(r"gh (issue|pr) (list|view|status)\b[^`\n]*?--json ([a-zA-Z][a-zA-Z,]*)")
@@ -64,6 +67,23 @@ def test_documented_gh_json_fields_exist(path):
 
         unknown = sorted(set(fields.split(",")) - available)
         assert not unknown, f"{path.relative_to(ROOT)} documents `gh {noun} {verb} --json` fields gh rejects: {unknown}"
+
+
+def test_adr_0001_does_not_reject_the_design_the_catalogue_uses():
+    """The exporter resolves a reading by an exact (statistic, scope) lookup.
+
+    So an entry must declare every scope it is exported at, and an ADR calling
+    one scope per entry sufficient describes a different exporter than the one
+    that ships.
+    """
+    multi = [e for version in catalogue.CATALOGUE for e in catalogue.CATALOGUE[version] if len(e.scopes) > 1]
+    assert multi, "no entry declares several scopes any more; this guard needs rewriting"
+
+    text = ADR_SCOPE.read_text()
+    assert "deepest scope is enough" not in text, (
+        f"docs/adr/0001 records declaring one scope per entry as sufficient, but "
+        f"{len(multi)} entries declare several, such as {multi[0].statistic!r}"
+    )
 
 
 def test_external_pr_filter_excludes_insiders_rather_than_listing_outsiders():

@@ -204,7 +204,9 @@ Kea permits several pd-pools to share a prefix and differ only in it.
 
 ``reclaimed-leases`` is the one statistic Kea reports under both pool kinds, so
 ``kea_dhcp6_addresses_reclaimed_total`` carries both ``pool`` and ``pd_pool``.
-Exactly one of the two is set on any series.
+A pool-scope series sets ``pool`` and a pd-pool-scope series sets ``pd_pool``,
+never both. Kea also reports the statistic per subnet, and that series leaves
+both labels empty.
 
 Upgrading from 0.9
 //////////////////

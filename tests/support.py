@@ -69,6 +69,16 @@ def exporter_with(registry, *targets, **kwargs):
     return exporter
 
 
+def samples(registry, name):
+    """Every exported sample of a metric, whatever its labels.
+
+    Negative assertions must not name labels: get_sample_value matches on the
+    complete label set, so a partial one returns None even when the series is
+    there, and `assert ... is None` can never fail.
+    """
+    return [s for metric in registry.collect() for s in metric.samples if s.name == name]
+
+
 def subnet4(subnet_id, cidr, pools=()):
     """A Kea DHCPv4 subnet configuration entry."""
     return {"id": subnet_id, "subnet": cidr, "pools": [{"pool": p} for p in pools]}

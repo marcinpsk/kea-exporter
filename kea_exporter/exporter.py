@@ -374,7 +374,8 @@ def _safe_target(target: str) -> str:
     """Strip embedded credentials from a target, for logging."""
     try:
         parsed = urlparse(target)
-        if not parsed.username:
+        # A URL may carry a password with no username, where username is "".
+        if not parsed.username and not parsed.password:
             return target
         host = parsed.hostname
         if parsed.port:

@@ -372,6 +372,18 @@ def validate_daemon(name: str, entries, documentation, never) -> None:
     """Fail fast on a daemon's tables that cannot produce consistent metrics."""
     grouped = group_by_metric(entries)
 
+    # index() keys on (statistic, scope): an entry with no scope gets no key, and
+    # a repeated pair keeps only the last entry. Either loses a metric in silence.
+    selectors = set()
+    for entry in entries:
+        if not entry.scopes:
+            raise CatalogueError(f"{name}: entry {entry.statistic!r} declares no scopes, so nothing can reach it")
+        for scope in entry.scopes:
+            selector = (entry.statistic, scope)
+            if selector in selectors:
+                raise CatalogueError(f"{name}: duplicate statistic and scope: {selector[0]!r} at {scope.value!r}")
+            selectors.add(selector)
+
     unknown = sorted({e.metric for e in entries}.difference(documentation))
     if unknown:
         raise CatalogueError(f"{name}: entries name metrics that are not declared: {unknown}")

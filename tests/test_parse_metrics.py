@@ -9,7 +9,7 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from kea_exporter import DHCPVersion, catalogue
-from tests.support import exporter_with, stat, subnet4, subnet6
+from tests.support import exporter_with, samples, stat, subnet4, subnet6
 
 SERVER = "memory://kea"
 
@@ -255,7 +255,7 @@ def test_never_exported_statistics_are_silent(exporter, registry, capsys):
         subnets,
     )
     assert capsys.readouterr().out == ""
-    assert sample(registry, "kea_dhcp4_addresses_assigned_total", server=SERVER) is None
+    assert not samples(registry, "kea_dhcp4_addresses_assigned_total")
 
 
 def test_cumulative_registered_nas_is_never_exported(exporter, capsys):
