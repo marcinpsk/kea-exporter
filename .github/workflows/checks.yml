@@ -45,7 +45,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run tests
-        run: uv run python -m unittest discover tests -v
+        run: uv run pytest -v
 
   coverage:
     name: Test Coverage
@@ -63,10 +63,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run tests with coverage
-        run: uv run coverage run --source=kea_exporter -m unittest discover tests -v
-
-      - name: Report coverage
-        run: uv run coverage report -m --fail-under=80
+        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=80
 
       - name: Upload coverage artifact
         if: always()
