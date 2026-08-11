@@ -43,7 +43,7 @@ uv run pytest -v
 ### Run with coverage
 
 ```bash
-uv run pytest --cov --cov-report=term-missing
+uv run pytest --cov --cov-report=term-missing --cov-fail-under=80
 ```
 
 ## New Features Tested
