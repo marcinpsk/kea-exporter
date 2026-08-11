@@ -25,22 +25,25 @@ The test suite covers the following modules:
 ### Run all tests
 
 ```bash
-python -m unittest discover tests
-
+uv run pytest
 ```
 
 ### Run a specific test file
 
 ```bash
-python -m unittest tests.test_http
-
+uv run pytest tests/test_http.py
 ```
 
 ### Run with verbose output
 
 ```bash
-python -m unittest discover tests -v
+uv run pytest -v
+```
 
+### Run with coverage
+
+```bash
+uv run pytest --cov --cov-report=term-missing --cov-fail-under=80
 ```
 
 ## New Features Tested

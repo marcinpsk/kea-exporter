@@ -80,6 +80,7 @@ kea-exporter --port 9547
 ```
 
 This will:
+
 - Collect metrics from DHCPv4, DHCPv6, and DDNS servers
 - Use different credentials for each endpoint (if needed)
 - Expose metrics on port 9547
@@ -161,8 +162,6 @@ kea-exporter \
   http://dhcp-server1:8000 \
   http://dhcp-server2:8000
 ```
-
-
 
 Example Prometheus scrape config:
 
