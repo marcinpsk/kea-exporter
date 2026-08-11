@@ -35,9 +35,8 @@ class Exporter:
             targets (Iterable[str]): Iterable of target addresses. Each target
                 is parsed as a URL; if it has a URL scheme a KeaHTTPClient is
                 created, otherwise if it has a path a KeaSocketClient is
-                created. Targets that cannot be parsed are skipped; targets
-                that raise during client creation keep a placeholder so
-                update() can retry them.
+                created. Construction failures are configuration errors, so
+                the target is reported and dropped.
             stale_timeout (int): Remove labels for a server silent longer than
                 this many seconds. 0 disables the timeout.
             registry (CollectorRegistry): Registry to register metrics with.
@@ -98,9 +97,9 @@ class Exporter:
                 elif url.path:
                     self.targets.append(KeaSocketClient(target, **kwargs))
                 else:
-                    click.echo(f"Unable to parse target argument: {target}")
+                    click.echo(f"Unable to parse target argument: {target}", err=True)
             except Exception as ex:
-                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}")
+                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
 
     def _build_metrics(self, version: DHCPVersion) -> dict:
         """Create one Gauge per metric the catalogue declares for this daemon."""
@@ -128,7 +127,7 @@ class Exporter:
         if target.server_id not in self._failing_targets:
             return
         self._failing_targets.discard(target.server_id)
-        click.echo(f"Collecting metrics from {target.server_id} again")
+        click.echo(f"Collecting metrics from {target.server_id} again", err=True)
 
     def update(self):
         """
@@ -136,8 +135,8 @@ class Exporter:
 
         Iterates each configured client, retrieves that client's reported
         statistics, and processes each response so the metrics reflect the
-        latest values. Uninitialized targets (from failed client creation) are
-        retried each update cycle. After all targets are processed, label
+        latest values. Targets with construction failures were reported and
+        dropped during initialization. After all targets are processed, label
         combinations that existed in the previous cycle but not this one are
         removed from the registry, but only for servers that successfully
         responded this cycle, to avoid dropping valid metrics due to transient

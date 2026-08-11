@@ -98,7 +98,9 @@ def test_an_unparseable_target_is_reported_and_dropped(registry, capsys):
     exporter = Exporter(targets=[""], registry=registry)
 
     assert exporter.targets == []
-    assert "Unable to parse target argument" in capsys.readouterr().out
+    output = capsys.readouterr()
+    assert "Unable to parse target argument" in output.err
+    assert output.out == ""
 
 
 def test_a_misconfigured_target_is_dropped_rather_than_retried(registry, capsys):
@@ -113,10 +115,11 @@ def test_a_misconfigured_target_is_dropped_rather_than_retried(registry, capsys)
     )
 
     assert exporter.targets == []
-    out = capsys.readouterr().out
-    assert "Failed to initialize target" in out
-    assert "admin" not in out and "s3cret" not in out
-    assert "kea.local:8000" in out
+    output = capsys.readouterr()
+    assert "Failed to initialize target" in output.err
+    assert "admin" not in output.err and "s3cret" not in output.err
+    assert "kea.local:8000" in output.err
+    assert output.out == ""
 
 
 # ------------------------------------------------------------------ scraping
@@ -178,7 +181,8 @@ def test_recovery_is_announced_and_re_arms_the_report(registry, capsys):
 
     output = capsys.readouterr()
     assert output.err.count("Failed to collect metrics") == 2
-    assert f"Collecting metrics from {SERVER} again" in output.out
+    assert f"Collecting metrics from {SERVER} again" in output.err
+    assert output.out == ""
 
 
 # ------------------------------------------------------------------ stale labels

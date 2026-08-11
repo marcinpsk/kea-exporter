@@ -23,8 +23,8 @@ class KeaHTTPClient:
         # kwargs allows passing additional arguments from CLI without breaking
         # this class
         """
-        Create a KeaHTTPClient configured to communicate with a Kea server
-        and initialize its module and subnet caches.
+        Create a KeaHTTPClient configured to communicate with a Kea server.
+        Construction performs no I/O.
 
         Parameters:
             target (str): Kea server URL; may include embedded credentials
@@ -46,8 +46,7 @@ class KeaHTTPClient:
                 timeout, client_cert) without errors.
 
         Notes:
-            Initializes internal state (modules, subnet maps) and triggers
-            discovery of available modules and subnets.
+            The first stats() call discovers available daemons and subnets.
         """
         super().__init__()
 
@@ -101,6 +100,7 @@ class KeaHTTPClient:
         self.subnets = {}
         self.subnets6 = {}
         self._discovered = False
+        self._subnet_refresh_failed = False
 
     @property
     def server_id(self) -> str:
@@ -149,21 +149,20 @@ class KeaHTTPClient:
             # Use list as-is
             modules = control_sockets
 
-        # Set modules if discovery succeeded
-        if modules:
-            self.modules = modules
-        else:
+        if not modules:
             # Fallback for setups without Control Agent (Kea 2.7.2+ and
             # newer may not have it)
             # Normalize keys to lowercase for case-insensitive detection
+            modules = []
             lower_args = {k.lower(): v for k, v in config_args.items()}
             for service in ["dhcp4", "dhcp6", "ddns", "d2"]:
                 if service in lower_args:
                     # Normalize d2 to ddns
                     if service == "d2":
-                        self.modules.append("ddns")
+                        modules.append("ddns")
                     else:
-                        self.modules.append(service)
+                        modules.append(service)
+        self.modules = modules
 
     @staticmethod
     def _collect_subnets(dhcp_config, subnet_key):
@@ -225,6 +224,23 @@ class KeaHTTPClient:
         if dhcp6_seen:
             self.subnets6 = new_subnets6
 
+    def _report_subnet_refresh_failure(self, ex: Exception) -> None:
+        """Report the first failed subnet refresh in an outage."""
+        if self._subnet_refresh_failed:
+            return
+        self._subnet_refresh_failed = True
+        click.echo(
+            f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(ex).__name__}: {ex}",
+            err=True,
+        )
+
+    def _report_subnet_refresh_recovery(self) -> None:
+        """Close the report opened by _report_subnet_refresh_failure."""
+        if not self._subnet_refresh_failed:
+            return
+        self._subnet_refresh_failed = False
+        click.echo(f"Refreshed subnets for {self._server_id} again", err=True)
+
     def stats(self):
         # Reload subnets on update in case of configurational update
         """
@@ -263,11 +279,9 @@ class KeaHTTPClient:
             try:
                 self.load_subnets()
             except Exception as e:
-                click.echo(
-                    f"Warning: failed to refresh subnets for {self._server_id}, "
-                    f"using cached data: {type(e).__name__}: {e}",
-                    err=True,
-                )
+                self._report_subnet_refresh_failure(e)
+            else:
+                self._report_subnet_refresh_recovery()
         r = requests.post(
             self._target,
             cert=self._cert,

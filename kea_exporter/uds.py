@@ -15,24 +15,17 @@ class KeaSocketClient:
         # arguments to both KeaHTTPClient and KeaSocketClient (e.g.,
         # timeout, client_cert) without errors
         """
-        Initialize the KeaSocketClient with a Unix domain socket path and
-        validate access.
+        Record the Unix domain socket path without accessing it.
 
         Parameters:
             sock_path (str): Path to the Unix domain socket used to
                 communicate with the Kea server.
 
         Description:
-            Validates that the socket exists and is readable/writable,
-            stores the absolute socket path, and initializes internal state
+            Stores the absolute socket path and initializes internal state
             (version, config, subnets, subnet_missing_info_sent,
             dhcp_version). The absolute socket path is also recorded as the
             client/server identifier.
-
-        Raises:
-            FileNotFoundError: If no socket exists at `sock_path`.
-            PermissionError: If the socket exists but is not readable and
-                writable by the current process.
         """
         super().__init__()
 
@@ -56,6 +49,11 @@ class KeaSocketClient:
 
         Checked per scrape, not once at construction: Kea may create the socket
         after the exporter starts, and the scrape loop retries.
+
+        Raises:
+            FileNotFoundError: If no socket exists at the recorded path.
+            PermissionError: If the socket exists but is not readable and
+                writable by the current process.
         """
         if not os.access(self.sock_path, os.F_OK):
             raise FileNotFoundError(f"Unix domain socket does not exist at {self.sock_path}")

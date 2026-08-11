@@ -2,13 +2,106 @@
 Tests for kea_exporter.http module
 """
 
+import json
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import Mock, patch
 
+import pytest
 import requests
+from prometheus_client import CollectorRegistry
 
 from kea_exporter import DHCPVersion
+from kea_exporter.exporter import Exporter
 from kea_exporter.http import KeaHTTPClient
+
+
+class _KeaHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        """Answer the subset of Kea commands used by the integration tests."""
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if body["command"] == "config-get" and "service" not in body:
+            payload = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        elif body["command"] == "config-get":
+            if self.server.failed_subnet_requests > 0:
+                self.server.failed_subnet_requests -= 1
+                self._write({"error": "unavailable"}, status=503)
+                return
+            payload = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+        else:
+            self.server.statistic_services.append(body["service"])
+            payload = [
+                {
+                    "result": 0,
+                    "arguments": {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]},
+                }
+            ]
+        self._write(payload)
+
+    def _write(self, payload, status=200):
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_args):
+        """Silence the default stderr access log."""
+
+
+@pytest.fixture
+def kea_http_server(monkeypatch):
+    """Run a controllable Kea-compatible server on the IPv4 loopback."""
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _KeaHandler)
+    server.failed_subnet_requests = 0
+    server.statistic_services = []
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_target_recovers_when_initial_subnet_discovery_fails(kea_http_server):
+    """A repeated initial discovery must replace, not duplicate, the daemon list."""
+    kea_http_server.failed_subnet_requests = 1
+    target = f"http://127.0.0.1:{kea_http_server.server_address[1]}"
+    registry = CollectorRegistry()
+    exporter = Exporter(targets=[target], registry=registry)
+    client = exporter.targets[0]
+
+    with pytest.raises(requests.HTTPError):
+        list(client.stats())
+    exporter.update()
+
+    assert client.modules == ["dhcp4"]
+    assert kea_http_server.statistic_services == [["dhcp4"]]
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_packets_sent_total",
+            {"server": target, "operation": "ack"},
+        )
+        == 7
+    )
+
+
+def test_subnet_refresh_outage_is_reported_once_and_closed_on_recovery(kea_http_server, capsys):
+    """Repeated refresh failures must produce one warning until recovery."""
+    target = f"http://127.0.0.1:{kea_http_server.server_address[1]}"
+    client = KeaHTTPClient(target)
+    list(client.stats())
+
+    kea_http_server.failed_subnet_requests = 3
+    for _ in range(3):
+        list(client.stats())
+    list(client.stats())
+
+    output = capsys.readouterr()
+    assert output.err.count("Warning: failed to refresh subnets") == 1
+    assert output.err.count(f"Refreshed subnets for {target} again") == 1
 
 
 class TestKeaHTTPClientInit(unittest.TestCase):
