@@ -143,9 +143,10 @@ exclude_commit_patterns = [
     '''Initial [Cc]ommit.*''',
 ]
 mode = "init"
-
-[tool.semantic_release.changelog.default_templates]
-template = "templates/CHANGELOG.md.j2"
+# Renders templates/CHANGELOG.md.j2. default_templates has no "template" key,
+# and semantic-release ignores keys it does not know, so naming it there read
+# as configuration while changing nothing.
+template_dir = "templates"
 
 [tool.semantic_release.changelog.environment]
 block_start_string = "{%"

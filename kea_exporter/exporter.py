@@ -265,7 +265,9 @@ class Exporter:
             self._report_missing(server_id, dhcp_version, subnet_id, f"{dhcp_version.name=}, {subnet_id=}")
             return None
 
-        labels = {"subnet": subnet_data.get("subnet"), "subnet_id": str(subnet_id)}
+        # A missing key must not reach Prometheus as the string "None", which no
+        # query could tell from a real value.
+        labels = {"subnet": subnet_data.get("subnet") or "", "subnet_id": str(subnet_id)}
         if pool_kind is None:
             return Scope.SUBNET, statistic, labels
 
@@ -274,7 +276,7 @@ class Exporter:
             pools = [_pd_pool_name(pool) for pool in subnet_data.get("pd-pools", [])]
             scope, label = Scope.PD_POOL, "pd_pool"
         else:
-            pools = [pool.get("pool") for pool in subnet_data.get("pools", [])]
+            pools = [pool.get("pool") or "" for pool in subnet_data.get("pools", [])]
             scope, label = Scope.POOL, "pool"
 
         if len(pools) <= pool_index:
@@ -332,7 +334,12 @@ class Exporter:
         for key, data in arguments.items():
             if not isinstance(data, list) or not data:
                 continue
-            value, _ = data[0]
+            # Kea reports [[value, timestamp]]. Unpacking anything else raises,
+            # and update() would report that as a failure of the whole target.
+            reading = data[0]
+            if not isinstance(reading, (list, tuple)) or len(reading) != 2:
+                continue
+            value = reading[0]
 
             resolved = self._resolve_selector(key, server, dhcp_version, subnets)
             if resolved is None:

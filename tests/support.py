@@ -38,7 +38,9 @@ class InMemoryTarget:
         return self._server_id
 
     def add(self, dhcp_version, arguments, subnets=None):
-        self.rows.append((self._server_id, dhcp_version, arguments, subnets or {}))
+        # Keep the mapping the caller passed; `or {}` would swap an empty one
+        # for a different object and hide anything the test adds afterwards.
+        self.rows.append((self._server_id, dhcp_version, arguments, {} if subnets is None else subnets))
         return self
 
     def stats(self):

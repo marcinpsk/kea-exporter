@@ -6,7 +6,7 @@ failure rather than passing against a mirrored copy of the label list.
 """
 
 import pytest
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, generate_latest
 
 from kea_exporter import DHCPVersion, catalogue
 from tests.support import exporter_with, samples, stat, subnet4, subnet6
@@ -282,6 +282,38 @@ def test_malformed_statistic_value_is_skipped(exporter, capsys):
         {},
     )
     assert capsys.readouterr().out == ""
+
+
+def test_a_reading_that_is_not_a_value_and_timestamp_is_skipped(exporter, registry, capsys):
+    """The outer list is checked; the reading inside it has to be checked too.
+
+    Unpacking `value, _ = data[0]` raises on anything that is not a two-item
+    sequence, which update() would report as a failure of the whole target.
+    """
+    exporter.parse_metrics(
+        SERVER,
+        DHCPVersion.DHCP4,
+        {
+            "pkt4-ack-sent": [5],
+            "pkt4-nak-sent": [{"value": 5}],
+            "pkt4-offer-sent": stat(9),
+        },
+        {},
+    )
+
+    assert capsys.readouterr().out == ""
+    assert sample(registry, "kea_dhcp4_packets_sent_total", server=SERVER, operation="offer") == 9
+
+
+def test_a_subnet_without_a_prefix_exports_an_empty_label(exporter, registry):
+    """A missing key must not reach Prometheus as the string "None"."""
+    subnets = {1: {"id": 1, "pools": [{}]}}
+
+    exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"subnet[1].pool[0].assigned-addresses": stat(4)}, subnets)
+
+    exposition = generate_latest(registry).decode()
+    assert "None" not in exposition, exposition
+    assert sample(registry, "kea_dhcp4_addresses_assigned_total", server=SERVER, subnet="", subnet_id="1", pool="") == 4
 
 
 def test_vanished_subnet_is_reported_once(exporter, capsys):

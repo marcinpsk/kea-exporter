@@ -140,6 +140,16 @@ def test_ipv6_target_keeps_its_brackets_when_credentials_are_stripped(registry, 
     assert f'server="http://[::1]:{port}"' in exposition, exposition
 
 
+def test_an_empty_userinfo_is_stripped_without_authenticating(registry, kea):
+    """`http://@host` has a userinfo delimiter but neither a username nor a password."""
+    port = kea.server_address[1]
+    exporter = Exporter(targets=[f"http://@127.0.0.1:{port}"], registry=registry)
+    exporter.update()
+
+    assert f'server="http://127.0.0.1:{port}"' in generate_latest(registry).decode()
+    assert kea.seen_auth and set(kea.seen_auth) == {None}, kea.seen_auth
+
+
 def test_username_without_a_password_is_stripped_without_authenticating(registry, kea):
     """requests derives no credentials from this shape, so neither may we."""
     port = kea.server_address[1]

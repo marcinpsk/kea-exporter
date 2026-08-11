@@ -7,11 +7,11 @@ Reads statistics from ISC Kea DHCP servers and exposes them as Prometheus metric
 ### Kea side
 
 **Target**:
-One Kea control endpoint the exporter reads from, addressed either by URL or by Unix socket path.
+One Kea control API the exporter reads from, addressed either by URL or by Unix socket path.
 _Avoid_: host, instance, endpoint, node
 
 **Daemon**:
-One of the three Kea services a target can expose: DHCP4, DHCP6, or DDNS. Each reports its own statistics.
+DHCP4, DHCP6, or DDNS. A target can expose more than one, and each reports its own statistics.
 _Avoid_: module, service, DHCP version
 
 **Statistic**:
@@ -19,14 +19,14 @@ A named value Kea reports, such as `assigned-addresses`. Always a Kea-side name.
 _Avoid_: metric, stat, counter
 
 **Scope**:
-The level a statistic is reported at. One of global, subnet, pool, pd-pool, or DDNS key. A statistic reported at subnet scope or deeper carries a subnet selector in its name.
+Where a statistic is reported: global, subnet, pool, pd-pool, or DDNS key. A statistic reported at subnet scope or deeper carries a subnet selector in its name.
 _Avoid_: level, granularity, context
 
 **Subnet**:
 An address range Kea serves, identified by a numeric id that appears in the statistic name.
 
 **Pool**:
-An address range inside a subnet. Distinct from a pd-pool.
+A block of addresses inside a subnet. Distinct from a pd-pool.
 _Avoid_: range
 
 **pd-pool**:
@@ -43,7 +43,7 @@ A Prometheus gauge the exporter exposes. Always an exporter-side name.
 _Avoid_: statistic, series
 
 **Catalogue**:
-The table that maps statistics to metrics, one per daemon. The single place a statistic's metric, scope, and labels are declared.
+The table that routes each statistic to its metric, one per daemon. The single place a statistic's metric, scope, and labels are declared.
 _Avoid_: map, mapping, registry, lookup table
 
 **Entry**:

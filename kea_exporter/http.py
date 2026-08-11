@@ -54,10 +54,11 @@ class KeaHTTPClient:
         # Parse URL to extract credentials
         parsed = urlparse(target)
 
-        # Extract basic auth from URL if present. urlparse reports an empty
-        # username for "http://:secret@host", so test both: the server id below
-        # becomes the `server` label on every series.
-        if parsed.username or parsed.password:
+        # Any userinfo comes out of the URL: the server id below becomes the
+        # `server` label on every series. Test the delimiter rather than the
+        # parts, because urlparse reports an empty username for both
+        # "http://:secret@host" and "http://@host".
+        if "@" in parsed.netloc:
             # requests derives no auth from a username with no password, so
             # neither do we, or stripping the URL would start sending one.
             self._auth = (

@@ -37,7 +37,18 @@ def test_every_commit_type_is_either_released_or_excluded(tag, subject):
         )
 
 
-def test_the_changelog_template_exists_where_the_config_points():
-    """The template name decides the output file, so a wrong path fails at release time."""
-    template = RELEASE["changelog"]["default_templates"]["template"]
-    assert (ROOT / template).is_file(), f"changelog template {template!r} is missing"
+def test_the_changelog_template_is_where_semantic_release_looks():
+    """`template_dir` selects the templates; `default_templates` has no `template` key.
+
+    semantic-release ignores keys it does not know, so naming the template
+    there reads as configuration while changing nothing.
+    """
+    changelog = RELEASE["changelog"]
+
+    assert "template" not in changelog.get("default_templates", {}), (
+        "default_templates.template is not a semantic-release setting, so it is silently "
+        "ignored; the template directory is set with changelog.template_dir"
+    )
+
+    template_dir = ROOT / changelog.get("template_dir", "templates")
+    assert (template_dir / "CHANGELOG.md.j2").is_file(), f"no changelog template in {template_dir}"

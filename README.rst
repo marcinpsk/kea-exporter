@@ -197,7 +197,7 @@ Prefix Delegation
 /////////////////
 
 Kea reports IA_PD statistics under ``subnet[N].pd-pool[M]``, a scope distinct
-from the ``pool[M]`` used for address pools. Prefix pools appear in the
+from the ``pool[M]`` used for address pools. pd-pools appear in the
 ``pd_pool`` label, written as ``prefix/prefix-len-delegated-len``, for example
 ``2001:db8:1::/48-64``. The delegated length is part of the identifier because
 Kea permits several pd-pools to share a prefix and differ only in it.
