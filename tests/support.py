@@ -1,13 +1,100 @@
-"""Test doubles that let tests drive the real Exporter end to end.
+"""Test doubles that let tests drive the real Exporter and the real adapters.
 
-Every test that uses these exercises real Gauge objects in a real
-CollectorRegistry, so assertions read the exported series rather than a
-mirrored copy of a gauge's label list.
+The in-memory targets exercise real Gauge objects in a real CollectorRegistry,
+so assertions read the exported series rather than a mirrored copy of a gauge's
+label list. The HTTP and Unix socket servers are real servers on real sockets,
+so an adapter test covers the transport it claims to cover.
 """
+
+import json
+import os
+import socketserver
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from kea_exporter.exporter import Exporter
 
 TIMESTAMP = "2026-01-01 00:00:00.000000"
+
+
+class _KeaHTTPHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        raw = json.dumps(self.server.responses[body["command"]]).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_args):
+        """Silence the default stderr access log."""
+
+
+class KeaHTTPServer(ThreadingHTTPServer):
+    """Serve supplied Kea responses over HTTP on an IPv4 loopback socket."""
+
+    def __init__(self, config_get, statistic_get_all):
+        super().__init__(("127.0.0.1", 0), _KeaHTTPHandler)
+        self.responses = {
+            "config-get": config_get,
+            "statistic-get-all": statistic_get_all,
+        }
+        self.thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def target(self):
+        """Return the URL that reaches this server."""
+        return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def close(self):
+        """Stop the worker thread and close the listening socket."""
+        self.shutdown()
+        self.server_close()
+        self.thread.join()
+
+
+class _KeaUnixSocketHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        raw = b""
+        while True:
+            chunk = self.request.recv(4096)
+            if not chunk:
+                return
+            raw += chunk
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            break
+
+        self.request.sendall(json.dumps(self.server.responses[body["command"]]).encode())
+
+
+class _ThreadingUnixStreamServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+class KeaUnixSocketServer(_ThreadingUnixStreamServer):
+    """Serve supplied Kea responses over a Unix domain socket."""
+
+    def __init__(self, path, config_get, statistic_get_all):
+        self.path = os.fspath(path)
+        super().__init__(self.path, _KeaUnixSocketHandler)
+        self.responses = {
+            "config-get": config_get,
+            "statistic-get-all": statistic_get_all,
+        }
+        self.thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        """Stop the worker threads and remove the socket file."""
+        self.shutdown()
+        self.server_close()
+        self.thread.join()
+        os.unlink(self.path)
 
 
 def stat(value):

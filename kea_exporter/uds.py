@@ -1,8 +1,10 @@
+"""Collect Kea statistics through a Unix domain socket."""
+
 import json
 import os
 import socket
 
-from kea_exporter import DHCPVersion
+from kea_exporter.subnets import DAEMON_SECTIONS, subnet_index
 
 
 class KeaConfigError(Exception):
@@ -112,11 +114,9 @@ class KeaSocketClient:
         the DHCP version and subnet mapping.
 
         Retrieves the server configuration and stores its "arguments" in
-        self.config. Sets self.dhcp_version to DHCPVersion.DHCP4 when a
-        "Dhcp4" section is present (using its "subnet4" list) or to
-        DHCPVersion.DHCP6 when a "Dhcp6" section is present (using its
-        "subnet6" list). Populates self.subnets as a dictionary mapping
-        each subnet's "id" to the subnet object.
+        self.config. Selects the first supported DHCP section and populates
+        self.subnets as a dictionary mapping each subnet's "id" to the subnet
+        object.
 
         Raises:
             KeaConfigError: If neither "Dhcp4" nor "Dhcp6" is found in
@@ -124,21 +124,11 @@ class KeaSocketClient:
         """
         self.config = self.query("config-get")["arguments"]
 
-        if "Dhcp4" in self.config:
-            self.dhcp_version = DHCPVersion.DHCP4
-            subnets = self.config["Dhcp4"].get("subnet4", [])
-            self.subnets = {subnet["id"]: subnet for subnet in subnets if "id" in subnet}
-            for network in self.config["Dhcp4"].get("shared-networks", []):
-                for subnet in network.get("subnet4", []):
-                    if "id" in subnet:
-                        self.subnets[subnet["id"]] = subnet
-        elif "Dhcp6" in self.config:
-            self.dhcp_version = DHCPVersion.DHCP6
-            subnets = self.config["Dhcp6"].get("subnet6", [])
-            self.subnets = {subnet["id"]: subnet for subnet in subnets if "id" in subnet}
-            for network in self.config["Dhcp6"].get("shared-networks", []):
-                for subnet in network.get("subnet6", []):
-                    if "id" in subnet:
-                        self.subnets[subnet["id"]] = subnet
-        else:
-            raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")
+        # Table order preserves first-match behavior, so DHCP4 wins when both sections exist.
+        for dhcp_version, (section_name, subnet_key) in DAEMON_SECTIONS.items():
+            if section_name in self.config:
+                self.dhcp_version = dhcp_version
+                self.subnets = subnet_index(self.config[section_name], subnet_key)
+                return
+
+        raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")

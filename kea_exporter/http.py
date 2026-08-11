@@ -1,3 +1,5 @@
+"""Collect Kea statistics through its HTTP control API."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -7,6 +9,7 @@ import click
 import requests
 
 from kea_exporter import DHCPVersion
+from kea_exporter.subnets import DAEMON_SECTIONS, subnet_index
 
 
 class KeaHTTPClient:
@@ -164,13 +167,6 @@ class KeaHTTPClient:
                         modules.append(service)
         self.modules = modules
 
-    @staticmethod
-    def _collect_subnets(dhcp_config, subnet_key):
-        """Yield all subnets from top-level and shared-networks in a DHCP config section."""
-        yield from dhcp_config.get(subnet_key, [])
-        for network in dhcp_config.get("shared-networks", []):
-            yield from network.get(subnet_key, [])
-
     def load_subnets(self):
         """
         Load IPv4 and IPv6 subnet definitions for configured DHCP modules
@@ -199,10 +195,7 @@ class KeaHTTPClient:
         r.raise_for_status()
         config = r.json()
 
-        new_subnets = {}
-        new_subnets6 = {}
-        dhcp4_seen = False
-        dhcp6_seen = False
+        indexed_by_daemon: dict[DHCPVersion, dict] = {}
         for module in config:
             if not isinstance(module, dict):
                 continue
@@ -212,17 +205,14 @@ class KeaHTTPClient:
                 continue
             args = module.get("arguments", {})
 
-            if "Dhcp4" in args:
-                dhcp4_seen = True
-                new_subnets.update({s["id"]: s for s in self._collect_subnets(args["Dhcp4"], "subnet4") if "id" in s})
-            if "Dhcp6" in args:
-                dhcp6_seen = True
-                new_subnets6.update({s["id"]: s for s in self._collect_subnets(args["Dhcp6"], "subnet6") if "id" in s})
+            for daemon, (section_name, subnet_key) in DAEMON_SECTIONS.items():
+                if section_name in args:
+                    indexed_by_daemon.setdefault(daemon, {}).update(subnet_index(args[section_name], subnet_key))
 
-        if dhcp4_seen:
-            self.subnets = new_subnets
-        if dhcp6_seen:
-            self.subnets6 = new_subnets6
+        if DHCPVersion.DHCP4 in indexed_by_daemon:
+            self.subnets = indexed_by_daemon[DHCPVersion.DHCP4]
+        if DHCPVersion.DHCP6 in indexed_by_daemon:
+            self.subnets6 = indexed_by_daemon[DHCPVersion.DHCP6]
 
     def _report_subnet_refresh_failure(self, ex: Exception) -> None:
         """Report the first failed subnet refresh in an outage."""
