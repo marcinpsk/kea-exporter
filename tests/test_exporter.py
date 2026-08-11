@@ -6,7 +6,7 @@ tests.support, so nothing here asserts against a mock of the code under test.
 """
 
 import pytest
-from prometheus_client import CollectorRegistry, Gauge, generate_latest
+from prometheus_client import CollectorRegistry, generate_latest
 
 from kea_exporter import DHCPVersion, catalogue
 from kea_exporter.exporter import Exporter
@@ -219,6 +219,32 @@ def test_a_label_is_kept_when_the_scrape_fails(registry):
     assert POOL in exported(registry)
 
 
+def test_a_scraped_source_prunes_its_stale_label_without_pruning_a_failed_source(registry):
+    server_a = "http://kea-a:53100"
+    server_b = "http://kea-b:53100"
+    new_pool = "10.0.0.100-10.0.0.110"
+    pool_b = "10.1.0.100-10.1.0.200"
+    row_a1 = (server_a, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    row_a2 = (server_a, DHCPVersion.DHCP4, {ASSIGNED: stat(3)}, pool_subnets(pool=new_pool))
+    row_b = (
+        server_b,
+        DHCPVersion.DHCP4,
+        {ASSIGNED: stat(7)},
+        pool_subnets(subnet="10.1.0.0/24", pool=pool_b),
+    )
+    target_a = ScriptedTarget([row_a1], [row_a2], server_id=server_a)
+    target_b = ScriptedTarget([row_b], ConnectionError("target down"), server_id=server_b)
+    exporter = exporter_with(registry, target_a, target_b)
+
+    exporter.update()
+    exporter.update()
+
+    exposition = exported(registry)
+    assert POOL not in exposition
+    assert new_pool in exposition
+    assert pool_b in exposition
+
+
 def test_a_label_is_pruned_once_the_stale_timeout_passes(registry, clock):
     """success, then a failure inside the timeout, then one past it."""
     target = ScriptedTarget(
@@ -259,7 +285,7 @@ def test_a_label_is_never_pruned_when_the_timeout_is_disabled(registry, clock):
 
 
 def test_the_stale_timeout_is_off_by_default(registry):
-    assert Exporter(targets=[], registry=registry).stale_timeout == 0
+    assert Exporter(targets=[], registry=registry).lifecycle.stale_timeout == 0
 
 
 def test_dhcp6_labels_survive_a_scrape_that_only_covers_dhcp4(registry):
@@ -279,40 +305,17 @@ def test_dhcp6_labels_survive_a_scrape_that_only_covers_dhcp4(registry):
     assert pool6 in exported(registry), "dhcp6 pool label was pruned when only dhcp4 was scraped"
 
 
-# ------------------------------------------------------------------ pruning failures
-
-
-def mark_stale(exporter, gauge, label_tuple):
-    """Offer a gauge to the pruner with no `server` label.
-
-    Without one the pruner cannot tell whether the scrape succeeded, so it
-    always calls remove() and the error paths are reachable.
-    """
-    exporter._seen_labels_previous = {id(gauge): (gauge, {label_tuple})}
-
-
-def test_removing_a_label_that_is_already_gone_is_silent(registry, capsys):
-    """prometheus-client >= 0.22 guards the delete, which is why the floor is 0.22."""
-    exporter = exporter_with(registry)
-    gauge = Gauge("kea_test_prunable", "doc", ("operation",), registry=registry)
-    gauge.labels(operation="kept").set(1)
-    mark_stale(exporter, gauge, ("never-set",))
+def test_no_source_from_a_target_is_scraped_when_a_later_row_fails_to_parse(registry):
+    new_pool = "10.0.0.100-10.0.0.110"
+    original = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    renamed = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(3)}, pool_subnets(pool=new_pool))
+    invalid = (SERVER, DHCPVersion.DHCP6, None, {})
+    exporter = exporter_with(registry, ScriptedTarget([original], [renamed, invalid], server_id=SERVER))
 
     exporter.update()
-
-    assert capsys.readouterr().err == ""
-    assert registry.get_sample_value("kea_test_prunable", {"operation": "kept"}) == 1
-
-
-def test_an_unexpected_removal_error_is_logged(registry, capsys):
-    """A real Gauge raises ValueError when the label count is wrong."""
-    exporter = exporter_with(registry)
-    gauge = Gauge("kea_test_prunable", "doc", ("operation",), registry=registry)
-    mark_stale(exporter, gauge, ("one", "too-many"))
-
     exporter.update()
 
-    assert "Unexpected error removing gauge label" in capsys.readouterr().err
+    assert POOL in exported(registry)
 
 
 # ------------------------------------------------------------------ Kea 3.2 statistics

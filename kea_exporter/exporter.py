@@ -9,6 +9,7 @@ from prometheus_client import Gauge
 from kea_exporter import DHCPVersion, catalogue
 from kea_exporter.catalogue import Scope
 from kea_exporter.http import KeaHTTPClient
+from kea_exporter.lifecycle import LabelLifecycle, Source
 from kea_exporter.target import KeaTarget
 from kea_exporter.uds import KeaSocketClient
 
@@ -57,28 +58,13 @@ class Exporter:
             version: {entry.statistic for entry in entries} for version, entries in catalogue.CATALOGUE.items()
         }
 
-        # Maps id(gauge) -> DHCPVersion so the pruning loop can determine which
-        # DHCP version a gauge belongs to without threading it through.
-        self._gauge_to_dhcp_version: dict[int, DHCPVersion] = {}
-        for version, gauges in self.metrics.items():
-            for gauge in gauges.values():
-                self._gauge_to_dhcp_version[id(gauge)] = version
-
         # track unhandled statistics, to notify only once
         self.unhandled_metrics = set()
 
         # track missing info per (server_id, dhcp_version), to notify only once
         self.subnet_missing_info_sent = {}
 
-        # Track label combinations set in the current and previous scrape cycle.
-        # Used to detect and remove stale metric children (e.g. renamed pools).
-        self._seen_labels_current: dict = {}
-        self._seen_labels_previous: dict = {}
-
-        # Stale-label timeout: prune labels for servers silent longer than this.
-        # 0 means disabled (default).
-        self.stale_timeout = stale_timeout
-        self._last_success: dict[tuple[str, DHCPVersion], float] = {}
+        self.lifecycle = LabelLifecycle(stale_timeout)
 
         # Targets a scrape can be attempted against. Building one performs no
         # I/O, so anything that raises below is a configuration error that
@@ -133,80 +119,25 @@ class Exporter:
         """
         Fetch statistics from all configured targets and update the metrics.
 
-        Iterates each configured client, retrieves that client's reported
-        statistics, and processes each response so the metrics reflect the
-        latest values. Targets with construction failures were reported and
-        dropped during initialization. After all targets are processed, label
-        combinations that existed in the previous cycle but not this one are
-        removed from the registry, but only for servers that successfully
-        responded this cycle, to avoid dropping valid metrics due to transient
-        scrape failures.
+        A target counts as scraped only after all its rows parse successfully.
+        After all targets finish, the label lifecycle processes stale labels.
         """
-        self._seen_labels_current = {}
-        successful_servers: set[tuple[str, DHCPVersion]] = set()
+        scraped: set[Source] = set()
 
         for target in self.targets:
             try:
-                # Materialise the generator before mutating any gauges so that a
-                # mid-stream exception cannot leave a partial snapshot in the registry
-                # or seed _seen_labels_current with incomplete label tuples.
+                # Materialise the generator before mutating any gauges.
                 stats_rows = list(target.stats())
-                completed_server_versions: set[tuple[str, DHCPVersion]] = set()
+                completed_sources: set[Source] = set()
                 for server_id, dhcp_version, arguments, subnets in stats_rows:
                     self.parse_metrics(server_id, dhcp_version, arguments, subnets)
-                    completed_server_versions.add((server_id, dhcp_version))
-                scrape_finished_at = time.monotonic()
-                for sv_pair in completed_server_versions:
-                    successful_servers.add(sv_pair)
-                    self._last_success[sv_pair] = scrape_finished_at
+                    completed_sources.add((server_id, dhcp_version))
+                scraped.update(completed_sources)
                 self._report_target_recovery(target)
             except Exception as ex:
                 self._report_target_failure(target, ex)
 
-        # Remove stale label combinations (e.g. a renamed pool) that were
-        # present last cycle but absent this cycle.  Only do this for servers
-        # that successfully delivered metrics this cycle; transient failures
-        # should not cause valid metrics to be pruned.
-        # Seed next_seen_labels from the current cycle; unpruned stale tuples
-        # for silent servers are merged in below so they remain trackable.
-        next_seen_labels: dict = {
-            gauge_id: (gauge, set(current_tuples))
-            for gauge_id, (gauge, current_tuples) in self._seen_labels_current.items()
-        }
-
-        for gauge_id, (gauge, prev_tuples) in self._seen_labels_previous.items():
-            current_tuples = self._seen_labels_current.get(gauge_id, (None, set()))[1]
-            stale = prev_tuples - current_tuples
-            if not stale:
-                continue
-            label_names = list(gauge._labelnames)
-            server_idx = label_names.index("server") if "server" in label_names else None
-            gauge_dhcp_version = self._gauge_to_dhcp_version.get(gauge_id)
-            for label_tuple in stale:
-                server_id_val = label_tuple[server_idx] if server_idx is not None else None
-                sv_pair = (
-                    (server_id_val, gauge_dhcp_version)
-                    if server_id_val is not None and gauge_dhcp_version is not None
-                    else None
-                )
-                scraped_ok = sv_pair in successful_servers if sv_pair is not None else False
-                timed_out = (
-                    self.stale_timeout > 0
-                    and sv_pair is not None
-                    and sv_pair in self._last_success
-                    and (time.monotonic() - self._last_success[sv_pair]) > self.stale_timeout
-                )
-                if scraped_ok or timed_out or server_idx is None:
-                    try:
-                        gauge.remove(*label_tuple)
-                    except Exception as e:
-                        click.echo(f"Unexpected error removing gauge label: {e}", err=True)
-                else:
-                    # Scrape failed and timeout not yet exceeded — keep the
-                    # tuple in tracking so it can be pruned on a later cycle.
-                    next_seen_labels.setdefault(gauge_id, (gauge, set()))[1].add(label_tuple)
-
-        self._seen_labels_previous = next_seen_labels
+        self.lifecycle.end_cycle(scraped, time.monotonic())
 
     def _resolve_selector(self, key, server_id, dhcp_version, subnets):
         """Split a statistic name into its scope, its bare name, and its labels.
@@ -271,7 +202,7 @@ class Exporter:
             file=sys.stderr,
         )
 
-    def _set_metric(self, metric, labels, value):
+    def _set_metric(self, metric, source: Source, labels, value):
         """Set the value, filling any label the reading did not supply.
 
         A reading shallower than the metric's deepest scope leaves the deeper
@@ -279,11 +210,8 @@ class Exporter:
         """
         filtered = {name: str(labels.get(name, "")) for name in metric._labelnames}
         metric.labels(**filtered).set(value)
-        # Record this label combination so stale entries can be pruned later.
-        gauge_id = id(metric)
-        if gauge_id not in self._seen_labels_current:
-            self._seen_labels_current[gauge_id] = (metric, set())
-        self._seen_labels_current[gauge_id][1].add(tuple(filtered[name] for name in metric._labelnames))
+        label_values = tuple(filtered[name] for name in metric._labelnames)
+        self.lifecycle.record(metric, source, label_values)
 
     def _report_unhandled(self, key, message):
         """Report an unhandled statistic once."""
@@ -334,7 +262,12 @@ class Exporter:
                 self._report_unhandled(key, f"Unhandled metric '{key}' please file an issue at {ISSUE_URL}")
                 continue
 
-            self._set_metric(metrics[entry.metric], {"server": server, **labels, **entry.labels}, value)
+            self._set_metric(
+                metrics[entry.metric],
+                (server, dhcp_version),
+                {"server": server, **labels, **entry.labels},
+                value,
+            )
 
 
 def _pd_pool_name(pool: dict) -> str:
