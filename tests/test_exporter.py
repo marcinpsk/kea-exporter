@@ -47,14 +47,21 @@ def exported(registry):
 
 
 def test_builds_a_gauge_for_every_catalogued_metric(registry):
-    """Every metric the catalogue declares is registered, for every daemon."""
+    """Every metric the catalogue declares is registered, for every daemon.
+
+    The exported names are read back out of the registry rather than off the
+    exporter's own dictionary, so a wrong prefix cannot pass.
+    """
     exporter = Exporter(targets=[], registry=registry)
+    exposition = generate_latest(registry).decode()
 
     for version, documentation in catalogue.METRICS.items():
         assert set(exporter.metrics[version]) == set(documentation), version.name
+        prefix = catalogue.METRIC_PREFIX[version]
         for metric, gauge in exporter.metrics[version].items():
             entries = catalogue.entries_by_metric(version)[metric]
             assert gauge._labelnames == catalogue.labelnames(entries), f"{version.name}:{metric}"
+            assert f"# HELP {prefix}_{metric} " in exposition, f"{version.name}:{metric} is not registered as such"
 
 
 @pytest.mark.parametrize(
