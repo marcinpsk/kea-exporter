@@ -52,13 +52,13 @@ class KeaSocketClient:
 
         Raises:
             FileNotFoundError: If no socket exists at the recorded path.
-            PermissionError: If the socket exists but is not readable and
-                writable by the current process.
+            PermissionError: If the socket is not writable by the current
+                process.
         """
         if not os.access(self.sock_path, os.F_OK):
             raise FileNotFoundError(f"Unix domain socket does not exist at {self.sock_path}")
-        if not os.access(self.sock_path, os.R_OK | os.W_OK):
-            raise PermissionError(f"No read/write permissions on Unix domain socket at {self.sock_path}")
+        if not os.access(self.sock_path, os.W_OK):
+            raise PermissionError(f"No write permission on Unix domain socket at {self.sock_path}")
 
     def query(self, command):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
