@@ -200,8 +200,6 @@ class Exporter:
                 if scraped_ok or timed_out or server_idx is None:
                     try:
                         gauge.remove(*label_tuple)
-                    except KeyError:
-                        pass
                     except Exception as e:
                         click.echo(f"Unexpected error removing gauge label: {e}", err=True)
                 else:

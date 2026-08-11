@@ -271,25 +271,6 @@ def test_dhcp6_labels_survive_a_scrape_that_only_covers_dhcp4(registry):
 # ------------------------------------------------------------------ pruning failures
 
 
-class UnremovableGauge:
-    """A gauge whose remove() fails, standing in for an older prometheus_client.
-
-    0.20 to 0.22 delete the child unguarded, so removing an absent one raises
-    KeyError. 0.23 guards the delete, so the installed version cannot produce
-    it, yet the dependency allows both. The pruner reads only `_labelnames`
-    and calls `remove`.
-    """
-
-    def __init__(self, error, labelnames=("operation",)):
-        self._labelnames = labelnames
-        self.error = error
-        self.removed = []
-
-    def remove(self, *labelvalues):
-        self.removed.append(labelvalues)
-        raise self.error
-
-
 def mark_stale(exporter, gauge, label_tuple):
     """Offer a gauge to the pruner with no `server` label.
 
@@ -300,14 +281,16 @@ def mark_stale(exporter, gauge, label_tuple):
 
 
 def test_removing_a_label_that_is_already_gone_is_silent(registry, capsys):
+    """prometheus-client >= 0.22 guards the delete, which is why the floor is 0.22."""
     exporter = exporter_with(registry)
-    gauge = UnremovableGauge(KeyError("no such child"))
+    gauge = Gauge("kea_test_prunable", "doc", ("operation",), registry=registry)
+    gauge.labels(operation="kept").set(1)
     mark_stale(exporter, gauge, ("never-set",))
 
     exporter.update()
 
-    assert gauge.removed == [("never-set",)], "remove() was never called, so this asserts nothing"
     assert capsys.readouterr().err == ""
+    assert registry.get_sample_value("kea_test_prunable", {"operation": "kept"}) == 1
 
 
 def test_an_unexpected_removal_error_is_logged(registry, capsys):

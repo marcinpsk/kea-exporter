@@ -345,7 +345,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1.7,<9.0" },
-    { name = "prometheus-client", specifier = ">=0.20.0,<1.0" },
+    { name = "prometheus-client", specifier = ">=0.22.0,<1.0" },
     { name = "requests", specifier = ">=2.32.5,<3.0" },
 ]
 
