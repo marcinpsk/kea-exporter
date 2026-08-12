@@ -49,7 +49,12 @@ class Exporter:
         self.registry = registry or REGISTRY
 
         # metrics[version][metric_name] -> Gauge, built from the catalogue.
-        self.metrics = {version: self._build_metrics(version) for version in catalogue.CATALOGUE}
+        self.metrics = {}
+        self.metric_labelnames = {}
+        for version in catalogue.CATALOGUE:
+            metrics, labelnames = self._build_metrics(version)
+            self.metrics[version] = metrics
+            self.metric_labelnames[version] = labelnames
         # index[version][(statistic, scope)] -> Entry
         self.index = {version: catalogue.index(version) for version in catalogue.CATALOGUE}
         # Statistics known at some scope, for telling a mis-scoped reading from
@@ -87,19 +92,22 @@ class Exporter:
             except Exception as ex:
                 click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
 
-    def _build_metrics(self, version: DHCPVersion) -> dict:
+    def _build_metrics(self, version: DHCPVersion) -> tuple[dict, dict]:
         """Create one Gauge per metric the catalogue declares for this daemon."""
         prefix = catalogue.METRIC_PREFIX[version]
         documentation = catalogue.METRICS[version]
-        return {
-            metric: Gauge(
+        metrics = {}
+        labelnames_by_metric = {}
+        for metric, entries in catalogue.entries_by_metric(version).items():
+            labelnames = catalogue.labelnames(entries)
+            metrics[metric] = Gauge(
                 f"{prefix}_{metric}",
                 documentation[metric],
-                catalogue.labelnames(entries),
+                labelnames,
                 registry=self.registry,
             )
-            for metric, entries in catalogue.entries_by_metric(version).items()
-        }
+            labelnames_by_metric[metric] = labelnames
+        return metrics, labelnames_by_metric
 
     def _report_target_failure(self, target: KeaTarget, ex: Exception) -> None:
         """Report a failing target once, not once per scrape while it stays down."""
@@ -202,15 +210,15 @@ class Exporter:
             file=sys.stderr,
         )
 
-    def _set_metric(self, metric, source: Source, labels, value):
+    def _set_metric(self, metric, labelnames, source: Source, labels, value):
         """Set the value, filling any label the reading did not supply.
 
         A reading shallower than the metric's deepest scope leaves the deeper
         labels empty, so a subnet total and a pool total stay distinct series.
         """
-        filtered = {name: str(labels.get(name, "")) for name in metric._labelnames}
+        filtered = {name: str(labels.get(name, "")) for name in labelnames}
         metric.labels(**filtered).set(value)
-        label_values = tuple(filtered[name] for name in metric._labelnames)
+        label_values = tuple(filtered[name] for name in labelnames)
         self.lifecycle.record(metric, source, label_values)
 
     def _report_unhandled(self, key, message):
@@ -264,6 +272,7 @@ class Exporter:
 
             self._set_metric(
                 metrics[entry.metric],
+                self.metric_labelnames[dhcp_version][entry.metric],
                 (server, dhcp_version),
                 {"server": server, **labels, **entry.labels},
                 value,

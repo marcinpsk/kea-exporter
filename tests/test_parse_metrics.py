@@ -42,6 +42,24 @@ def test_dhcp4_packet_counters(exporter, registry):
     assert sample(registry, "kea_dhcp4_packets_received_total", server=SERVER, operation="discover") == 20
 
 
+def test_metric_updates_use_only_the_public_gauge_interface(exporter):
+    class PublicGauge:
+        def labels(self, **labels):
+            self.labels_seen = labels
+            return self
+
+        def set(self, value):
+            self.value = value
+
+    gauge = PublicGauge()
+    exporter.metrics[DHCPVersion.DHCP4]["packets_sent_total"] = gauge
+
+    exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)}, {})
+
+    assert gauge.labels_seen == {"server": SERVER, "operation": "ack"}
+    assert gauge.value == 10
+
+
 def test_dhcp6_packet_counters(exporter, registry):
     exporter.parse_metrics(
         SERVER,

@@ -60,7 +60,9 @@ def test_builds_a_gauge_for_every_catalogued_metric(registry):
         prefix = catalogue.METRIC_PREFIX[version]
         for metric, gauge in exporter.metrics[version].items():
             entries = catalogue.entries_by_metric(version)[metric]
-            assert gauge._labelnames == catalogue.labelnames(entries), f"{version.name}:{metric}"
+            labelnames = catalogue.labelnames(entries)
+            assert exporter.metric_labelnames[version][metric] == labelnames, f"{version.name}:{metric}"
+            gauge.labels(**dict.fromkeys(labelnames, ""))
             assert f"# HELP {prefix}_{metric} " in exposition, f"{version.name}:{metric} is not registered as such"
 
 
