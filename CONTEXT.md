@@ -58,6 +58,10 @@ _Avoid_: ignored metric, skipped metric
 One pass over every target, reading each one's statistics and updating the metrics.
 _Avoid_: run, poll, refresh
 
+**Source**:
+One daemon on one target. A scrape succeeds or fails per source, and stale labels are tracked per source.
+_Avoid_: instance, node, endpoint
+
 **Stale label**:
 A label combination present in the previous scrape cycle and absent from the current one, such as a renamed pool.
 _Avoid_: orphaned label, dead series
