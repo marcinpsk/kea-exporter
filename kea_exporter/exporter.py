@@ -137,9 +137,12 @@ class Exporter:
                 # Materialise the generator before mutating any gauges.
                 stats_rows = list(target.stats())
                 completed_sources: set[Source] = set()
+                pending_updates = []
                 for server_id, dhcp_version, arguments, subnets in stats_rows:
-                    self.parse_metrics(server_id, dhcp_version, arguments, subnets)
+                    pending_updates.extend(self._parse_metric_updates(server_id, dhcp_version, arguments, subnets))
                     completed_sources.add((server_id, dhcp_version))
+                for update in pending_updates:
+                    self._set_metric(*update)
                 scraped.update(completed_sources)
                 self._report_target_recovery(target)
             except Exception as ex:
@@ -229,12 +232,18 @@ class Exporter:
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
         """Parse Kea statistics and export them as Prometheus metrics."""
+        for update in self._parse_metric_updates(server, dhcp_version, arguments, subnets):
+            self._set_metric(*update)
+
+    def _parse_metric_updates(self, server, dhcp_version, arguments, subnets):
+        """Parse Kea statistics without publishing them."""
         index = self.index.get(dhcp_version)
         if index is None:
-            return
+            return []
         metrics = self.metrics[dhcp_version]
         never_export = catalogue.NEVER_EXPORT[dhcp_version]
         known = self.known[dhcp_version]
+        updates = []
 
         for key, data in arguments.items():
             if not isinstance(data, list) or not data:
@@ -270,13 +279,17 @@ class Exporter:
                 self._report_unhandled(key, f"Unhandled metric '{key}' please file an issue at {ISSUE_URL}")
                 continue
 
-            self._set_metric(
-                metrics[entry.metric],
-                self.metric_labelnames[dhcp_version][entry.metric],
-                (server, dhcp_version),
-                {"server": server, **labels, **entry.labels},
-                value,
+            updates.append(
+                (
+                    metrics[entry.metric],
+                    self.metric_labelnames[dhcp_version][entry.metric],
+                    (server, dhcp_version),
+                    {"server": server, **labels, **entry.labels},
+                    value,
+                )
             )
+
+        return updates
 
 
 def _pd_pool_name(pool: dict) -> str:

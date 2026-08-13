@@ -317,7 +317,9 @@ def test_no_source_from_a_target_is_scraped_when_a_later_row_fails_to_parse(regi
     exporter.update()
     exporter.update()
 
-    assert POOL in exported(registry)
+    exposition = exported(registry)
+    assert POOL in exposition
+    assert new_pool not in exposition
 
 
 # ------------------------------------------------------------------ Kea 3.2 statistics
