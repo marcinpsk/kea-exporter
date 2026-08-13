@@ -4,7 +4,9 @@ Tests for kea_exporter.cli module
 
 import os
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 from wsgiref.util import setup_testing_defaults
 
@@ -300,11 +302,12 @@ class TestCLIWSGIApp(unittest.TestCase):
         self.patcher1.stop()
         self.patcher2.stop()
 
-    def _start_wsgi_app(self, interval, wall_clock=None):
+    def _start_wsgi_app(self, interval, wall_clock=None, target=None):
         from click.testing import CliRunner
 
         clock = {"now": 1000.0}
-        target = InMemoryTarget()
+        if target is None:
+            target = InMemoryTarget()
         httpd = _CapturingHTTPServer()
 
         def exporter_factory(**_kwargs):
@@ -378,6 +381,30 @@ class TestCLIWSGIApp(unittest.TestCase):
 
         self._scrape(app)
         self.assertEqual(target.calls, 2)
+
+    def test_concurrent_wsgi_requests_share_the_interval_gate(self):
+        class CoordinatedTarget(InMemoryTarget):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Barrier(2)
+
+            def stats(self):
+                self.calls += 1
+                try:
+                    self.entered.wait(timeout=1)
+                except threading.BrokenBarrierError:
+                    pass
+                yield from self.rows
+
+        app, target, clock = self._start_wsgi_app(60, target=CoordinatedTarget())
+        clock["now"] = 1060.0
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(self._scrape, app) for _ in range(2)]
+            for future in futures:
+                future.result()
+
+        self.assertEqual(target.calls, 1)
 
 
 class TestCLIEnvironmentVariables(unittest.TestCase):

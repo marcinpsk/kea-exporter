@@ -1,5 +1,6 @@
 import signal
 import sys
+import threading
 import time
 from typing import Any
 
@@ -111,15 +112,17 @@ def cli(port, address, interval, **kwargs: Any):
     httpd, _ = start_http_server(port, address)
 
     last_update = time.monotonic()
+    update_lock = threading.Lock()
 
     def local_wsgi_app(registry):
         func = make_wsgi_app(registry, False)
 
         def app(environ, start_response):
             nonlocal last_update
-            if time.monotonic() - last_update >= interval:
-                exporter.update()
-                last_update = time.monotonic()
+            with update_lock:
+                if time.monotonic() - last_update >= interval:
+                    exporter.update()
+                    last_update = time.monotonic()
             output_array = func(environ, start_response)
             return output_array
 
