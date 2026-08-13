@@ -128,7 +128,9 @@ def test_pool_reading_of_subnet_scoped_statistic_is_skipped(exporter, registry, 
 
     labels = {"server": SERVER, "subnet": "10.0.0.0/24", "subnet_id": "1"}
     assert registry.get_sample_value("kea_dhcp4_leases_reused_total", labels) is None
-    assert "v4-lease-reuses" in capsys.readouterr().out
+    output = capsys.readouterr()
+    assert "v4-lease-reuses" in output.err
+    assert output.out == ""
 
 
 def test_subnet_reading_of_subnet_scoped_statistic_still_exports(exporter, registry):
@@ -162,4 +164,6 @@ def test_unknown_statistic_is_reported_once(exporter, capsys):
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"pkt4-invented-received": stat(1)}, {})
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"pkt4-invented-received": stat(2)}, {})
 
-    assert capsys.readouterr().out.count("pkt4-invented-received") == 1
+    output = capsys.readouterr()
+    assert output.err.count("pkt4-invented-received") == 1
+    assert output.out == ""

@@ -4,7 +4,8 @@ import json
 import os
 import socket
 
-from kea_exporter.subnets import DAEMON_SECTIONS, subnet_index
+from kea_exporter.daemon import DAEMON_SPECS
+from kea_exporter.subnets import subnet_index
 
 
 class KeaConfigError(Exception):
@@ -125,10 +126,10 @@ class KeaSocketClient:
         self.config = self.query("config-get")["arguments"]
 
         # Table order preserves first-match behavior, so DHCP4 wins when both sections exist.
-        for dhcp_version, (section_name, subnet_key) in DAEMON_SECTIONS.items():
-            if section_name in self.config:
+        for dhcp_version, spec in DAEMON_SPECS.items():
+            if spec.section is not None and spec.subnet_key is not None and spec.section in self.config:
                 self.dhcp_version = dhcp_version
-                self.subnets = subnet_index(self.config[section_name], subnet_key)
+                self.subnets = subnet_index(self.config[spec.section], spec.subnet_key)
                 return
 
         raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")

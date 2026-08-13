@@ -1,519 +1,195 @@
-"""
-Tests for kea_exporter.uds module
-"""
+"""Behavior of the Unix socket target adapter through a local Kea server."""
 
-import json
 import os
 import socket
-import tempfile
-import threading
-import unittest
-from unittest.mock import MagicMock, patch
+
+import pytest
 
 from kea_exporter import DHCPVersion
 from kea_exporter.uds import KeaConfigError, KeaSocketClient
+from tests.support import KeaControl, KeaResponse, KeaUnixSocketServer
 
-SOCKET_SUBNET = {"id": 1, "subnet": "198.18.0.0/24"}
-SOCKET_STATISTICS = {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]}
+SUBNET4 = {"id": 1, "subnet": "198.18.1.0/24"}
+STATISTICS4 = {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]}
+CONFIG4 = {"result": 0, "arguments": {"Dhcp4": {"subnet4": [SUBNET4]}}}
+STATS4 = {"result": 0, "arguments": STATISTICS4}
 
 
-def _answer_kea_queries(listener):
-    responses = {
-        "config-get": {"result": 0, "arguments": {"Dhcp4": {"subnet4": [SOCKET_SUBNET]}}},
-        "statistic-get-all": {"result": 0, "arguments": SOCKET_STATISTICS},
-    }
-    for _ in range(len(responses)):
-        connection, _ = listener.accept()
-        with connection:
-            request = json.loads(connection.recv(4096))
-            connection.sendall(json.dumps(responses[request["command"]]).encode())
+@pytest.fixture
+def unix_server(tmp_path):
+    """Start shared Kea Unix socket adapters and close them after each test."""
+    servers = []
 
+    def start(config_get=CONFIG4, statistic_get_all=STATS4):
+        path = tmp_path / f"kea-{len(servers)}.sock"
+        server = KeaUnixSocketServer(path, KeaControl(config_get, statistic_get_all))
+        servers.append(server)
+        return server
 
-class TestKeaSocketClientInit(unittest.TestCase):
-    """Test KeaSocketClient initialization"""
+    yield start
 
-    def test_a_missing_socket_is_reported_by_the_scrape(self):
-        """Kea may create the socket after the exporter starts, so it is checked per scrape."""
-        with tempfile.TemporaryDirectory() as tmp:
-            client = KeaSocketClient(os.path.join(tmp, "absent.sock"))
+    for server in servers:
+        server.close()
 
-            with self.assertRaises(FileNotFoundError) as context:
-                list(client.stats())
 
-        self.assertIn("does not exist", str(context.exception))
+def test_a_missing_socket_is_reported_by_the_scrape(tmp_path):
+    client = KeaSocketClient(tmp_path / "absent.sock")
 
-    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permissions")
-    def test_a_socket_without_write_permission_is_reported_by_the_scrape(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "kea.sock")
-            with socket.socket(socket.AF_UNIX) as listener:
-                listener.bind(path)
-                os.chmod(path, 0)
-                client = KeaSocketClient(path)
-
-                with self.assertRaises(PermissionError) as context:
-                    list(client.stats())
-
-        self.assertIn("No write permission", str(context.exception))
-
-    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permissions")
-    def test_a_write_only_socket_can_be_scraped(self):
-        """The Unix socket pathname needs write permission, not read permission."""
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "kea.sock")
-            with socket.socket(socket.AF_UNIX) as listener:
-                listener.bind(path)
-                listener.listen()
-                server = threading.Thread(target=_answer_kea_queries, args=(listener,), daemon=True)
-                server.start()
-                os.chmod(path, 0o200)
-
-                self.assertFalse(os.access(path, os.R_OK))
-                self.assertTrue(os.access(path, os.W_OK))
-                rows = list(KeaSocketClient(path).stats())
-                server.join(timeout=1)
-
-        self.assertFalse(server.is_alive())
-        self.assertEqual(
-            rows,
-            [(path, DHCPVersion.DHCP4, SOCKET_STATISTICS, {SOCKET_SUBNET["id"]: SOCKET_SUBNET})],
-        )
-
-    def test_construction_touches_nothing(self):
-        """Construction records the path only, so a target that is down still builds."""
-        client = KeaSocketClient("/nonexistent/socket")
-
-        self.assertEqual(client.server_id, "/nonexistent/socket")
-
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_init_success(self, mock_abspath, mock_access):
-        """Test successful initialization"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/abs/path/to/socket"
-
-        client = KeaSocketClient("/path/to/socket")
-
-        self.assertEqual(client.sock_path, "/abs/path/to/socket")
-        self.assertEqual(client._server_id, "/abs/path/to/socket")
-        self.assertIsNone(client.version)
-        self.assertIsNone(client.config)
-        self.assertIsNone(client.subnets)
-        self.assertEqual(client.subnet_missing_info_sent, set())
-        self.assertIsNone(client.dhcp_version)
-
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_server_id_matches_socket_path(self, mock_abspath, mock_access):
-        """Test that server_id is set to socket path"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/var/run/kea/control.sock"
-
-        client = KeaSocketClient("/var/run/kea/control.sock")
-
-        self.assertEqual(client._server_id, "/var/run/kea/control.sock")
-
-
-class TestKeaSocketClientQuery(unittest.TestCase):
-    """Test KeaSocketClient.query method"""
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_query_success(self, mock_abspath, mock_access, mock_socket_class):
-        """Test successful query"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        # Mock socket
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        mock_sock.recv.side_effect = [json.dumps({"result": 0, "arguments": {"test": "data"}}).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-        result = client.query("test-command")
-
-        self.assertEqual(result["result"], 0)
-        self.assertEqual(result["arguments"]["test"], "data")
-
-        # Verify socket operations
-        mock_sock.connect.assert_called_once_with("/path/to/socket")
-        mock_sock.sendall.assert_called_once()
-
-        # Verify command format
-        sent_data = mock_sock.sendall.call_args[0][0]
-        sent_command = json.loads(sent_data.decode("utf-8"))
-        self.assertEqual(sent_command["command"], "test-command")
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_query_failure_result(self, mock_abspath, mock_access, mock_socket_class):
-        """Test query with non-zero result"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        mock_sock.recv.side_effect = [json.dumps({"result": 1, "text": "Error message"}).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-
-        with self.assertRaises(ValueError) as ctx:
-            client.query("failing-command")
-        self.assertIn("Error message", str(ctx.exception))
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_query_sets_socket_timeout(self, mock_abspath, mock_access, mock_socket_class):
-        """Test that query sets a timeout on the socket"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        mock_sock.recv.side_effect = [json.dumps({"result": 0, "arguments": {}}).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-        client.query("test-command")
-
-        mock_sock.settimeout.assert_called_once_with(10)
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_query_failure_without_text(self, mock_abspath, mock_access, mock_socket_class):
-        """Test query failure message when no text field in response"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        mock_sock.recv.side_effect = [json.dumps({"result": 2}).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-
-        with self.assertRaises(ValueError) as ctx:
-            client.query("bad-command")
-        self.assertIn("bad-command", str(ctx.exception))
-        self.assertIn("result 2", str(ctx.exception))
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_query_timeout_on_partial_response(self, mock_abspath, mock_access, mock_socket_class):
-        """query() raises socket.timeout if recv() times out mid-response."""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-        # First recv returns partial data, second recv raises timeout
-        mock_sock.recv.side_effect = [
-            b'{"result": 0, "arg',
-            socket.timeout("timed out"),
-        ]
-        client = KeaSocketClient("/path/to/socket")
-        with self.assertRaises(socket.timeout):
-            client.query("statistic-get-all")
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_query_multi_chunk_response(self, mock_abspath, mock_access, mock_socket_class):
-        """query() correctly reassembles a response split across multiple recv() chunks."""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-        part1 = b'{"result": 0, "argu'
-        part2 = b'ments": {"Dhcp4": {}}}'
-        mock_sock.recv.side_effect = [part1, part2, b""]
-        client = KeaSocketClient("/path/to/socket")
-        result = client.query("config-get")
-        self.assertEqual(result["result"], 0)
-        self.assertEqual(result["arguments"], {"Dhcp4": {}})
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_query_socket_error_propagates(self, mock_abspath, mock_access, mock_socket_class):
-        """query() lets socket.error propagate when recv() fails mid-response."""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-        mock_sock.recv.side_effect = [b"partial", socket.error("connection reset")]
-        client = KeaSocketClient("/path/to/socket")
-        with self.assertRaises(socket.error):
-            client.query("statistic-get-all")
-
-
-class TestKeaSocketClientReload(unittest.TestCase):
-    """Test KeaSocketClient.reload method"""
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_reload_dhcp4_config(self, mock_abspath, mock_access, mock_socket_class):
-        """Test reload with DHCP4 configuration"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {
-            "result": 0,
-            "arguments": {
-                "Dhcp4": {"subnet4": [{"id": 1, "subnet": "192.168.1.0/24"}, {"id": 2, "subnet": "192.168.2.0/24"}]}
-            },
-        }
-
-        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-        client.reload()
-
-        self.assertEqual(client.dhcp_version, DHCPVersion.DHCP4)
-        self.assertEqual(len(client.subnets), 2)
-        self.assertIn(1, client.subnets)
-        self.assertIn(2, client.subnets)
-        self.assertEqual(client.subnets[1]["subnet"], "192.168.1.0/24")
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_reload_dhcp6_config(self, mock_abspath, mock_access, mock_socket_class):
-        """Test reload with DHCP6 configuration"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {"result": 0, "arguments": {"Dhcp6": {"subnet6": [{"id": 10, "subnet": "2001:db8::/64"}]}}}
-
-        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-        client.reload()
-
-        self.assertEqual(client.dhcp_version, DHCPVersion.DHCP6)
-        self.assertEqual(len(client.subnets), 1)
-        self.assertIn(10, client.subnets)
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_reload_unsupported_config(self, mock_abspath, mock_access, mock_socket_class):
-        """Test reload with unsupported configuration"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {"result": 0, "arguments": {"UnknownService": {}}}
-
-        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-
-        with self.assertRaises(KeaConfigError):
-            client.reload()
-
-
-class TestKeaSocketClientStats(unittest.TestCase):
-    """Test KeaSocketClient.stats method"""
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_stats_dhcp4(self, mock_abspath, mock_access, mock_socket_class):
-        """Test stats for DHCP4"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {"result": 0, "arguments": {"Dhcp4": {"subnet4": [{"id": 1, "subnet": "192.168.1.0/24"}]}}}
-
-        stats_data = {
-            "result": 0,
-            "arguments": {"pkt4-received": [[100, "2024-01-01"]], "pkt4-ack-sent": [[50, "2024-01-01"]]},
-        }
-
-        mock_sock.recv.side_effect = [
-            json.dumps(config_data).encode(),
-            b"",
-            json.dumps(stats_data).encode(),
-            b"",
-        ]
-
-        client = KeaSocketClient("/path/to/socket")
-        results = list(client.stats())
-
-        self.assertEqual(len(results), 1)
-        server_id, dhcp_version, arguments, subnets = results[0]
-
-        self.assertEqual(server_id, "/path/to/socket")
-        self.assertEqual(dhcp_version, DHCPVersion.DHCP4)
-        self.assertIn("pkt4-received", arguments)
-        self.assertEqual(len(subnets), 1)
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_stats_dhcp6(self, mock_abspath, mock_access, mock_socket_class):
-        """Test stats for DHCP6"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {"result": 0, "arguments": {"Dhcp6": {"subnet6": [{"id": 10, "subnet": "2001:db8::/64"}]}}}
-
-        stats_data = {"result": 0, "arguments": {"pkt6-received": [[200, "2024-01-01"]]}}
-
-        mock_sock.recv.side_effect = [
-            json.dumps(config_data).encode(),
-            b"",
-            json.dumps(stats_data).encode(),
-            b"",
-        ]
-
-        client = KeaSocketClient("/path/to/socket")
-        results = list(client.stats())
-
-        _server_id, dhcp_version, arguments, _subnets = results[0]
-
-        self.assertEqual(dhcp_version, DHCPVersion.DHCP6)
-        self.assertIn("pkt6-received", arguments)
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_stats_calls_reload(self, mock_abspath, mock_access, mock_socket_class):
-        """Test that stats calls reload to refresh configuration"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}
-
-        stats_data = {"result": 0, "arguments": {}}
-
-        mock_sock.recv.side_effect = [
-            json.dumps(config_data).encode(),
-            b"",
-            json.dumps(stats_data).encode(),
-            b"",
-        ]
-
-        client = KeaSocketClient("/path/to/socket")
+    with pytest.raises(FileNotFoundError, match="does not exist"):
         list(client.stats())
 
-        # Should have made two queries: config-get and statistic-get-all
-        self.assertEqual(mock_sock.sendall.call_count, 2)
 
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_stats_server_id_is_socket_path(self, mock_abspath, mock_access, mock_socket_class):
-        """Test that stats returns socket path as server_id"""
-        mock_access.return_value = True
-        socket_path = "/var/run/kea/control.sock"
-        mock_abspath.return_value = socket_path
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")
+def test_a_socket_without_write_permission_is_reported_by_the_scrape(unix_server):
+    server = unix_server()
+    os.chmod(server.path, 0)
 
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}
-
-        stats_data = {"result": 0, "arguments": {}}
-
-        mock_sock.recv.side_effect = [
-            json.dumps(config_data).encode(),
-            b"",
-            json.dumps(stats_data).encode(),
-            b"",
-        ]
-
-        client = KeaSocketClient(socket_path)
-        results = list(client.stats())
-
-        server_id = results[0][0]
-        self.assertEqual(server_id, socket_path)
+    with pytest.raises(PermissionError, match="No write permission"):
+        list(KeaSocketClient(server.path).stats())
 
 
-class TestKeaSocketClientEdgeCases(unittest.TestCase):
-    """Test edge cases for KeaSocketClient"""
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")
+def test_a_write_only_socket_can_be_scraped(unix_server):
+    """The Unix socket pathname needs write permission, not read permission."""
+    server = unix_server()
+    os.chmod(server.path, 0o200)
 
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_empty_subnets(self, mock_abspath, mock_access, mock_socket_class):
-        """Test handling of empty subnet list"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}
-
-        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-        client.reload()
-
-        self.assertEqual(client.subnets, {})
-
-    @patch("socket.socket")
-    @patch("os.access")
-    @patch("os.path.abspath")
-    def test_subnet_map_creation(self, mock_abspath, mock_access, mock_socket_class):
-        """Test that subnets are correctly mapped by ID"""
-        mock_access.return_value = True
-        mock_abspath.return_value = "/path/to/socket"
-
-        mock_sock = MagicMock()
-        mock_socket_class.return_value.__enter__.return_value = mock_sock
-
-        config_data = {
-            "result": 0,
-            "arguments": {
-                "Dhcp4": {
-                    "subnet4": [
-                        {"id": 5, "subnet": "10.0.5.0/24", "pools": []},
-                        {"id": 10, "subnet": "10.0.10.0/24", "pools": []},
-                        {"id": 15, "subnet": "10.0.15.0/24", "pools": []},
-                    ]
-                }
-            },
-        }
-
-        mock_sock.recv.side_effect = [json.dumps(config_data).encode(), b""]
-
-        client = KeaSocketClient("/path/to/socket")
-        client.reload()
-
-        # Verify subnet map has all IDs
-        self.assertEqual(set(client.subnets.keys()), {5, 10, 15})
-        # Verify each ID maps to correct subnet data
-        self.assertEqual(client.subnets[5]["subnet"], "10.0.5.0/24")
-        self.assertEqual(client.subnets[10]["subnet"], "10.0.10.0/24")
-        self.assertEqual(client.subnets[15]["subnet"], "10.0.15.0/24")
+    assert not os.access(server.path, os.R_OK)
+    assert os.access(server.path, os.W_OK)
+    assert list(KeaSocketClient(server.path).stats()) == [
+        (server.path, DHCPVersion.DHCP4, STATISTICS4, {SUBNET4["id"]: SUBNET4})
+    ]
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_construction_records_an_absolute_path_without_performing_io(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    client = KeaSocketClient("absent.sock", timeout=30)
+
+    assert client.server_id == os.fspath(tmp_path / "absent.sock")
+    assert client.timeout == 30
+
+
+def test_query_sends_the_command_and_returns_the_response(unix_server):
+    server = unix_server()
+    server.control.responses["version-get"] = {"result": 0, "arguments": {"version": "test"}}
+
+    response = KeaSocketClient(server.path).query("version-get")
+
+    assert response == {"result": 0, "arguments": {"version": "test"}}
+    assert server.control.requests == [{"command": "version-get"}]
+
+
+def test_query_reports_a_kea_error(unix_server):
+    server = unix_server()
+    server.control.responses["config-get"] = {"result": 1, "text": "configuration unavailable"}
+
+    with pytest.raises(ValueError, match="configuration unavailable"):
+        KeaSocketClient(server.path).query("config-get")
+
+
+def test_query_reports_a_kea_error_without_text(unix_server):
+    server = unix_server()
+    server.control.responses["config-get"] = {"result": 2}
+
+    with pytest.raises(ValueError, match="config-get.*result 2"):
+        KeaSocketClient(server.path).query("config-get")
+
+
+def test_query_uses_the_configured_socket_timeout(unix_server):
+    server = unix_server(KeaResponse(CONFIG4, delay=0.1))
+
+    with pytest.raises(socket.timeout):
+        KeaSocketClient(server.path, timeout=0.01).query("config-get")
+
+
+def test_query_reassembles_a_chunked_response(unix_server):
+    chunks = (b'{"result": 0, "argu', b'ments": {"Dhcp4": {}}}')
+    server = unix_server(KeaResponse(None, chunks=chunks))
+
+    response = KeaSocketClient(server.path).query("config-get")
+
+    assert response == {"result": 0, "arguments": {"Dhcp4": {}}}
+
+
+def test_query_rejects_invalid_json(unix_server):
+    server = unix_server(KeaResponse(b"not-json"))
+
+    with pytest.raises(ValueError, match="invalid JSON.*config-get"):
+        KeaSocketClient(server.path).query("config-get")
+
+
+@pytest.mark.parametrize(
+    ("daemon", "section", "subnet_key", "subnet", "statistics"),
+    [
+        (
+            DHCPVersion.DHCP4,
+            "Dhcp4",
+            "subnet4",
+            SUBNET4,
+            STATISTICS4,
+        ),
+        (
+            DHCPVersion.DHCP6,
+            "Dhcp6",
+            "subnet6",
+            {"id": 6, "subnet": "2001:db8:6::/64"},
+            {"pkt6-received": [[11, "2026-01-01 00:00:00.000000"]]},
+        ),
+    ],
+)
+def test_stats_yields_the_detected_daemons_statistics_and_subnets(
+    unix_server, daemon, section, subnet_key, subnet, statistics
+):
+    config = {"result": 0, "arguments": {section: {subnet_key: [subnet]}}}
+    server = unix_server(config, {"result": 0, "arguments": statistics})
+
+    rows = list(KeaSocketClient(server.path).stats())
+
+    assert rows == [(server.path, daemon, statistics, {subnet["id"]: subnet})]
+    assert server.control.requests == [
+        {"command": "config-get"},
+        {"command": "statistic-get-all"},
+    ]
+
+
+def test_stats_reloads_configuration_on_every_scrape(unix_server):
+    server = unix_server()
+    client = KeaSocketClient(server.path)
+    first_rows = list(client.stats())
+    replacement = {"id": 2, "subnet": "198.18.2.0/24"}
+    server.control.responses["config-get"] = {
+        "result": 0,
+        "arguments": {"Dhcp4": {"subnet4": [replacement]}},
+    }
+
+    second_rows = list(client.stats())
+
+    assert first_rows[0][3] == {1: SUBNET4}
+    assert second_rows[0][3] == {2: replacement}
+    assert [request["command"] for request in server.control.requests].count("config-get") == 2
+
+
+def test_reload_rejects_a_configuration_without_a_supported_daemon(unix_server):
+    config = {"result": 0, "arguments": {"UnknownDaemon": {}}}
+    server = unix_server(config)
+
+    with pytest.raises(KeaConfigError, match="no supported configuration"):
+        KeaSocketClient(server.path).reload()
+
+
+def test_reload_selects_dhcp4_first_when_both_sections_are_present(unix_server):
+    subnet6 = {"id": 6, "subnet": "2001:db8:6::/64"}
+    config = {
+        "result": 0,
+        "arguments": {
+            "Dhcp6": {"subnet6": [subnet6]},
+            "Dhcp4": {"subnet4": [SUBNET4]},
+        },
+    }
+    server = unix_server(config)
+
+    row = list(KeaSocketClient(server.path).stats())[0]
+
+    assert row[1] is DHCPVersion.DHCP4
+    assert row[3] == {1: SUBNET4}

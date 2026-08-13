@@ -89,10 +89,11 @@ def cli(port, address, interval, **kwargs: Any):
     the main loop.
 
     Instantiates the Exporter from provided keyword arguments, verifies
-    targets are configured, starts a Prometheus HTTP server bound to the
-    given address and port, installs a WSGI app that triggers exporter
-    updates at most once per `interval` seconds, prints the listening
-    address, and blocks indefinitely to keep the server running.
+    targets are configured, and collects the initial metrics. Then it starts
+    a Prometheus HTTP server bound to the given address and port, installs a
+    WSGI app that triggers exporter updates at most once per `interval`
+    seconds, prints the listening address, and blocks indefinitely to keep
+    the server running.
 
     Parameters:
         port (int): TCP port to bind the Prometheus HTTP server.
@@ -109,6 +110,8 @@ def cli(port, address, interval, **kwargs: Any):
     if not exporter.targets:
         sys.exit(1)
 
+    click.echo(f"Starting {__project__} {__version__}", err=True)
+    exporter.update()
     httpd, _ = start_http_server(port, address)
 
     last_update = time.monotonic()

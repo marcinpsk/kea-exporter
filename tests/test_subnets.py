@@ -9,7 +9,7 @@ from kea_exporter import DHCPVersion
 from kea_exporter.http import KeaHTTPClient
 from kea_exporter.subnets import subnet_index
 from kea_exporter.uds import KeaSocketClient
-from tests.support import KeaHTTPServer, KeaUnixSocketServer, _KeaUnixSocketHandler
+from tests.support import KeaControl, KeaHTTPServer, KeaUnixSocketServer, _KeaUnixSocketHandler
 
 
 @pytest.fixture
@@ -25,7 +25,7 @@ def kea_http_server(no_proxy):
     servers = []
 
     def start(config_get, statistic_get_all):
-        server = KeaHTTPServer(config_get, statistic_get_all)
+        server = KeaHTTPServer(KeaControl(config_get, statistic_get_all))
         servers.append(server)
         return server
 
@@ -42,7 +42,7 @@ def kea_unix_socket_server(tmp_path):
 
     def start(config_get, statistic_get_all):
         path = tmp_path / f"kea-{len(servers)}.sock"
-        server = KeaUnixSocketServer(path, config_get, statistic_get_all)
+        server = KeaUnixSocketServer(path, KeaControl(config_get, statistic_get_all))
         servers.append(server)
         return server
 
@@ -112,7 +112,7 @@ def test_an_empty_dhcp4_section_replaces_the_http_clients_previously_loaded_subn
     client = KeaHTTPClient(server.target)
 
     first_rows = list(client.stats())
-    server.responses["config-get"] = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
+    server.control.responses["config-get"] = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
     second_rows = list(client.stats())
 
     assert first_rows[0][3] == {1: subnet}
@@ -127,7 +127,7 @@ def test_a_response_without_a_dhcp4_section_keeps_the_http_clients_previously_lo
     client = KeaHTTPClient(server.target)
 
     first_rows = list(client.stats())
-    server.responses["config-get"] = [{"result": 0, "arguments": {}}]
+    server.control.responses["config-get"] = [{"result": 0, "arguments": {}}]
     second_rows = list(client.stats())
 
     assert first_rows[0][3] == {1: subnet}

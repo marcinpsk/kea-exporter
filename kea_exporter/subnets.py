@@ -1,14 +1,9 @@
 """Provide subnet indexing shared by the Kea adapters."""
 
-from kea_exporter import DHCPVersion
-
-DAEMON_SECTIONS: dict[DHCPVersion, tuple[str, str]] = {
-    DHCPVersion.DHCP4: ("Dhcp4", "subnet4"),
-    DHCPVersion.DHCP6: ("Dhcp6", "subnet6"),
-}
+SubnetIndex = dict[int, dict]
 
 
-def subnet_index(section: dict, subnet_key: str) -> dict[int, dict]:
+def subnet_index(section: dict, subnet_key: str) -> SubnetIndex:
     """Index subnets by ID from the top level and every shared network."""
     indexed = {subnet["id"]: subnet for subnet in section.get(subnet_key, []) if "id" in subnet}
     for network in section.get("shared-networks", []):

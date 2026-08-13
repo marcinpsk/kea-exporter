@@ -104,3 +104,31 @@ def test_an_unexpected_removal_error_is_reported_to_stderr(registry, capsys):
 
     assert "Unexpected error removing gauge label" in capsys.readouterr().err
     assert registry.get_sample_value("kea_test_prunable", LABELS) is None
+
+
+def test_a_failed_removal_is_retried_on_the_next_cycle(registry, capsys):
+    class FailOnceGauge(Gauge):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.removal_attempts = 0
+
+        def remove(self, *label_values):
+            self.removal_attempts += 1
+            if self.removal_attempts == 1:
+                raise RuntimeError("transient removal failure")
+            return super().remove(*label_values)
+
+    lifecycle = LabelLifecycle()
+    gauge = FailOnceGauge("kea_test_retry_removal", "doc", ("server",), registry=registry)
+    gauge.labels(*LABEL_VALUES).set(1)
+    lifecycle.record(gauge, SOURCE, LABEL_VALUES)
+    lifecycle.end_cycle({SOURCE}, now=0.0)
+
+    lifecycle.end_cycle({SOURCE}, now=1.0)
+    assert registry.get_sample_value("kea_test_retry_removal", LABELS) == 1
+    assert "Unexpected error removing gauge label" in capsys.readouterr().err
+
+    lifecycle.end_cycle({SOURCE}, now=2.0)
+
+    assert gauge.removal_attempts == 2
+    assert registry.get_sample_value("kea_test_retry_removal", LABELS) is None

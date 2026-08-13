@@ -144,6 +144,50 @@ def test_update_exports_what_a_target_reports(registry):
     assert registry.get_sample_value("kea_dhcp4_packets_sent_total", {"server": SERVER, "operation": "ack"}) == 10
 
 
+def test_a_rejected_reading_does_not_publish_earlier_readings_from_the_same_target(registry):
+    initial = (
+        SERVER,
+        DHCPVersion.DHCP4,
+        {"pkt4-ack-sent": stat(10), "pkt4-discover-received": stat(5)},
+        {},
+    )
+    invalid = (
+        SERVER,
+        DHCPVersion.DHCP4,
+        {"pkt4-ack-sent": stat(20), "pkt4-discover-received": stat("not-a-number")},
+        {},
+    )
+    exporter = exporter_with(registry, ScriptedTarget([initial], [invalid], server_id=SERVER))
+
+    exporter.update()
+    exporter.update()
+
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_packets_sent_total",
+            {"server": SERVER, "operation": "ack"},
+        )
+        == 10
+    )
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_packets_received_total",
+            {"server": SERVER, "operation": "discover"},
+        )
+        == 5
+    )
+
+
+def test_an_unhandled_statistic_is_reported_only_to_stderr(registry, capsys):
+    target = InMemoryTarget(SERVER).add(DHCPVersion.DHCP4, {"invented-statistic": stat(1)})
+
+    exporter_with(registry, target).update()
+
+    output = capsys.readouterr()
+    assert "Unhandled metric 'invented-statistic'" in output.err
+    assert output.out == ""
+
+
 def test_one_failing_target_does_not_stop_the_others(registry, capsys):
     down = FailingTarget("http://server1:8000", ConnectionError("server1 down"))
     up = InMemoryTarget("http://server2:8000").add(DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(4)})

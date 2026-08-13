@@ -226,7 +226,7 @@ class Exporter:
     def _report_unhandled(self, key, message):
         """Report an unhandled statistic once."""
         if key not in self.unhandled_metrics:
-            click.echo(message)
+            click.echo(message, err=True)
             self.unhandled_metrics.add(key)
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
@@ -254,7 +254,7 @@ class Exporter:
             reading = data[0]
             if not isinstance(reading, (list, tuple)) or len(reading) != 2:
                 continue
-            value = reading[0]
+            value = float(reading[0])
 
             resolved = self._resolve_selector(key, server, dhcp_version, subnets)
             if resolved is None:
