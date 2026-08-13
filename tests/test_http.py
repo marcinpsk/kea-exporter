@@ -7,29 +7,11 @@ from prometheus_client import CollectorRegistry
 from kea_exporter import DHCPVersion
 from kea_exporter.exporter import Exporter
 from kea_exporter.http import KeaHTTPClient
-from tests.support import KeaControl, KeaHTTPServer, KeaResponse
+from tests.support import KeaResponse
 
 CONFIG4 = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
 STATISTICS4 = {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]}
 STATS4 = [{"result": 0, "arguments": STATISTICS4}]
-
-
-@pytest.fixture
-def http_server(monkeypatch):
-    """Start shared Kea HTTP adapters and close them after each test."""
-    monkeypatch.setenv("NO_PROXY", "*")
-    monkeypatch.setenv("no_proxy", "*")
-    servers = []
-
-    def start(config_get=CONFIG4, statistic_get_all=STATS4):
-        server = KeaHTTPServer(KeaControl(config_get, statistic_get_all))
-        servers.append(server)
-        return server
-
-    yield start
-
-    for server in servers:
-        server.close()
 
 
 def statistic_requests(server):
@@ -54,7 +36,7 @@ def test_a_target_recovers_when_initial_subnet_discovery_fails(http_server):
         list(client.stats())
     exporter.update()
 
-    assert [request["service"] for request in statistic_requests(server)] == [["dhcp4"]]
+    assert statistic_requests(server) == [{"command": "statistic-get-all", "arguments": {}}]
     assert (
         registry.get_sample_value(
             "kea_dhcp4_packets_sent_total",
@@ -160,23 +142,17 @@ def test_no_verify_takes_precedence_over_a_ca_bundle(capsys):
                             "control-sockets": {
                                 "dhcp4": {"socket-type": "unix"},
                                 "dhcp6": {"socket-type": "unix"},
+                                "d2": {"socket-type": "unix"},
                             }
                         }
                     },
                 }
             ],
-            [DHCPVersion.DHCP4, DHCPVersion.DHCP6],
-            ["dhcp4", "dhcp6"],
+            [DHCPVersion.DHCP4, DHCPVersion.DHCP6, DHCPVersion.DDNS],
+            ["dhcp4", "dhcp6", "d2"],
         ),
-        (CONFIG4, [DHCPVersion.DHCP4], ["dhcp4"]),
-        ([{"result": 0, "arguments": {"Dhcp6": {"subnet6": []}}}], [DHCPVersion.DHCP6], ["dhcp6"]),
-        ([{"result": 0, "arguments": {"ddns": {}}}], [DHCPVersion.DDNS], ["ddns"]),
-        ([{"result": 0, "arguments": {"d2": {}}}], [DHCPVersion.DDNS], ["ddns"]),
-        (
-            [{"result": 0, "arguments": {"DHCP4": {}, "DDNS": {}}}],
-            [DHCPVersion.DHCP4, DHCPVersion.DDNS],
-            ["dhcp4", "ddns"],
-        ),
+        (CONFIG4, [DHCPVersion.DHCP4], None),
+        ([{"result": 0, "arguments": {"Dhcp6": {"subnet6": []}}}], [DHCPVersion.DHCP6], None),
     ],
 )
 def test_stats_discovers_daemons_and_uses_canonical_service_names(
@@ -188,9 +164,22 @@ def test_stats_discovers_daemons_and_uses_canonical_service_names(
     rows = list(KeaHTTPClient(server.target).stats())
 
     assert [row[1] for row in rows] == expected_daemons
-    assert statistic_requests(server) == [
-        {"command": "statistic-get-all", "arguments": {}, "service": expected_services}
-    ]
+    expected_request = {"command": "statistic-get-all", "arguments": {}}
+    if expected_services is not None:
+        expected_request["service"] = expected_services
+    assert statistic_requests(server) == [expected_request]
+
+
+def test_a_direct_ddns_daemon_is_discovered_without_a_service_selector(http_server):
+    """Direct Kea APIs recommend omitting the Control Agent service selector."""
+    config = [{"result": 0, "arguments": {"DhcpDdns": {}}}]
+    statistics = {"update-sent": [[3, "2026-01-01 00:00:00.000000"]]}
+    server = http_server(config, [{"result": 0, "arguments": statistics}])
+
+    rows = list(KeaHTTPClient(server.target).stats())
+
+    assert rows == [(server.target, DHCPVersion.DDNS, statistics, {})]
+    assert statistic_requests(server) == [{"command": "statistic-get-all", "arguments": {}}]
 
 
 def test_one_daemon_map_keeps_statistics_and_subnets_aligned(http_server):
@@ -202,7 +191,7 @@ def test_one_daemon_map_keeps_statistics_and_subnets_aligned(http_server):
             "arguments": {
                 "Dhcp4": {"subnet4": [subnet4]},
                 "Dhcp6": {"subnet6": [subnet6]},
-                "ddns": {},
+                "DhcpDdns": {},
             },
         }
     ]
@@ -212,6 +201,23 @@ def test_one_daemon_map_keeps_statistics_and_subnets_aligned(http_server):
         {"result": 0, "arguments": {"daemon": "ddns"}},
     ]
     server = http_server(config, statistics)
+    server.control.queue(
+        "config-get",
+        [
+            {
+                "result": 0,
+                "arguments": {
+                    "Control-agent": {
+                        "control-sockets": {
+                            "dhcp4": {"socket-type": "unix"},
+                            "dhcp6": {"socket-type": "unix"},
+                            "d2": {"socket-type": "unix"},
+                        }
+                    }
+                },
+            }
+        ],
+    )
 
     rows = list(KeaHTTPClient(server.target).stats())
 
@@ -222,10 +228,11 @@ def test_one_daemon_map_keeps_statistics_and_subnets_aligned(http_server):
     ]
     config_requests = [request for request in server.control.requests if request["command"] == "config-get"]
     assert config_requests[-1]["service"] == ["dhcp4", "dhcp6"]
+    assert statistic_requests(server)[0]["service"] == ["dhcp4", "dhcp6", "d2"]
 
 
 def test_ddns_does_not_request_subnet_configuration(http_server):
-    config = [{"result": 0, "arguments": {"ddns": {}}}]
+    config = [{"result": 0, "arguments": {"DhcpDdns": {}}}]
     server = http_server(config, [{"result": 0, "arguments": {}}])
 
     rows = list(KeaHTTPClient(server.target).stats())

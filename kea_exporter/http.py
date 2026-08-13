@@ -102,6 +102,7 @@ class KeaHTTPClient:
             self._verify = True
         self._subnets_by_daemon: dict[DHCPVersion, SubnetIndex] = {}
         self._discovered = False
+        self._through_control_agent = False
         self._subnet_refresh_failed = False
 
     @property
@@ -114,9 +115,8 @@ class KeaHTTPClient:
 
         Queries the server configuration and records the detected daemons.
         Prefers discovery via the Control-agent's
-        `control-sockets` entry when present; otherwise inspects top-level
-        service keys case-insensitively and adds any of "dhcp4", "dhcp6",
-        or "ddns" as found. Treats the legacy key "d2" as "ddns".
+        `control-sockets` entry when present; otherwise matches the top-level
+        direct-daemon configuration sections case-insensitively.
         """
         r = requests.post(
             self._target,
@@ -140,7 +140,9 @@ class KeaHTTPClient:
         config_args = config[0].get("arguments", {})
 
         # Try Control Agent discovery first (legacy)
-        control_sockets = config_args.get("Control-agent", {}).get("control-sockets", [])
+        control_agent = config_args.get("Control-agent")
+        self._through_control_agent = isinstance(control_agent, dict)
+        control_sockets = control_agent.get("control-sockets", []) if self._through_control_agent else []
 
         # control-sockets can be either a list (legacy) or a dict
         # (proper Kea API)
@@ -151,28 +153,33 @@ class KeaHTTPClient:
             # Use list as-is
             services = control_sockets
 
-        if not services:
-            # Fallback for setups without Control Agent (Kea 2.7.2+ and
-            # newer may not have it)
-            # Normalize keys to lowercase for case-insensitive detection
-            services = []
+        if services:
+            daemons = []
+            for service in services:
+                if not isinstance(service, str):
+                    continue
+                daemon = daemon_for_service(service)
+                if daemon is not None and daemon not in daemons:
+                    daemons.append(daemon)
+        else:
+            # Direct daemon endpoints return their configuration section.
             lower_args = {k.lower(): v for k, v in config_args.items()}
-            for service in ["dhcp4", "dhcp6", "ddns", "d2"]:
-                if service in lower_args:
-                    # Normalize d2 to ddns
-                    if service == "d2":
-                        services.append("ddns")
-                    else:
-                        services.append(service)
-        daemons = []
-        for service in services:
-            if not isinstance(service, str):
-                continue
-            daemon = daemon_for_service(service)
-            if daemon is not None and daemon not in daemons:
-                daemons.append(daemon)
+            daemons = [
+                daemon
+                for daemon, spec in DAEMON_SPECS.items()
+                if spec.section is not None and spec.section.lower() in lower_args
+            ]
 
         self._subnets_by_daemon = {daemon: self._subnets_by_daemon.get(daemon, {}) for daemon in daemons}
+
+    def _command(self, name, daemons, arguments=None):
+        """Build a command for a direct daemon or the legacy Control Agent."""
+        command = {"command": name}
+        if arguments is not None:
+            command["arguments"] = arguments
+        if self._through_control_agent:
+            command["service"] = [DAEMON_SPECS[daemon].service for daemon in daemons]
+        return command
 
     def load_subnets(self):
         """
@@ -190,10 +197,7 @@ class KeaHTTPClient:
             cert=self._cert,
             auth=self._auth,
             verify=self._verify,
-            json={
-                "command": "config-get",
-                "service": [DAEMON_SPECS[daemon].service for daemon in dhcp_daemons],
-            },
+            json=self._command("config-get", dhcp_daemons),
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
@@ -280,11 +284,7 @@ class KeaHTTPClient:
             cert=self._cert,
             auth=self._auth,
             verify=self._verify,
-            json={
-                "command": "statistic-get-all",
-                "arguments": {},
-                "service": [DAEMON_SPECS[daemon].service for daemon in self._subnets_by_daemon],
-            },
+            json=self._command("statistic-get-all", self._subnets_by_daemon, arguments={}),
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )

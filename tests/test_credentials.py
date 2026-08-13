@@ -14,7 +14,7 @@ import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 from kea_exporter.exporter import Exporter
-from tests.support import KeaControl, KeaHTTPServer, KeaIPv6HTTPServer
+from tests.support import KeaIPv6HTTPServer
 
 # Raises ValueError inside KeaHTTPClient before it opens a connection.
 CERT_WITHOUT_KEY = {"client_cert": "/nonexistent/cert.pem"}
@@ -28,34 +28,23 @@ def registry():
     return CollectorRegistry()
 
 
-@pytest.fixture
-def no_proxy(monkeypatch):
-    """Keep an ambient proxy configuration out of a loopback test."""
-    monkeypatch.setenv("NO_PROXY", "*")
-    monkeypatch.setenv("no_proxy", "*")
-
-
-def serve(server_type, host):
+def response_set():
     config = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
     statistics = [{"result": 0, "arguments": STATISTICS}]
-    return server_type(KeaControl(config, statistics), host)
+    return config, statistics
 
 
 @pytest.fixture
-def kea(no_proxy):
-    server = serve(KeaHTTPServer, "127.0.0.1")
-    yield server
-    server.close()
+def kea(http_server):
+    return http_server(*response_set())
 
 
 @pytest.fixture
-def kea6(no_proxy):
+def kea6(http_server):
     try:
-        server = serve(KeaIPv6HTTPServer, "::1")
+        return http_server(*response_set(), server_type=KeaIPv6HTTPServer, host="::1")
     except OSError as ex:
         pytest.skip(f"no IPv6 loopback to bind: {ex}")
-    yield server
-    server.close()
 
 
 def seen_auth(server):

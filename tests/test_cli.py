@@ -11,10 +11,7 @@ from prometheus_client import CollectorRegistry
 
 from kea_exporter import __version__
 from kea_exporter.cli import cli
-from tests.support import KeaControl, KeaHTTPServer, stat
-
-CONFIG4 = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
-EMPTY_STATISTICS = [{"result": 0, "arguments": {}}]
+from tests.support import stat
 
 
 class _CapturingHTTPServer:
@@ -66,24 +63,6 @@ class _CLIRuntime:
 
 
 @pytest.fixture
-def kea_servers(monkeypatch):
-    """Start local Kea HTTP adapters and close them after each test."""
-    monkeypatch.setenv("NO_PROXY", "*")
-    monkeypatch.setenv("no_proxy", "*")
-    servers = []
-
-    def start(statistics=EMPTY_STATISTICS, config=CONFIG4):
-        server = KeaHTTPServer(KeaControl(config, statistics))
-        servers.append(server)
-        return server
-
-    yield start
-
-    for server in servers:
-        server.close()
-
-
-@pytest.fixture
 def cli_runtime(monkeypatch):
     """Run the real CLI until its long-running sleep starts."""
     registry = CollectorRegistry()
@@ -125,10 +104,10 @@ def scrape(app):
     assert body
 
 
-def test_cli_collects_metrics_before_serving(cli_runtime, kea_servers):
+def test_cli_collects_metrics_before_serving(cli_runtime, http_server):
     """The registry is populated before the HTTP adapter can serve it."""
     statistics = [{"result": 0, "arguments": {"pkt4-ack-sent": stat(7)}}]
-    kea = kea_servers(statistics)
+    kea = http_server(statistic_get_all=statistics)
 
     result = cli_runtime.invoke("--interval", "60", kea.target)
 
@@ -143,8 +122,8 @@ def test_cli_collects_metrics_before_serving(cli_runtime, kea_servers):
     assert cli_runtime.httpd.app is not None
 
 
-def test_cli_announces_startup_and_shutdown(cli_runtime, kea_servers):
-    kea = kea_servers()
+def test_cli_announces_startup_and_shutdown(cli_runtime, http_server):
+    kea = http_server()
 
     result = cli_runtime.invoke(kea.target)
 
@@ -166,13 +145,13 @@ def test_cli_announces_startup_and_shutdown(cli_runtime, kea_servers):
 )
 def test_cli_uses_the_requested_listen_address(
     cli_runtime,
-    kea_servers,
+    http_server,
     arguments,
     env,
     expected_port,
     expected_address,
 ):
-    kea = kea_servers()
+    kea = http_server()
 
     result = cli_runtime.invoke(*arguments, kea.target, env=env)
 
@@ -182,9 +161,9 @@ def test_cli_uses_the_requested_listen_address(
     assert f"Listening on http://{expected_address}:{expected_port}" in result.stdout
 
 
-def test_cli_collects_from_targets_supplied_by_the_environment(cli_runtime, kea_servers):
-    first = kea_servers([{"result": 0, "arguments": {"pkt4-ack-sent": stat(3)}}])
-    second = kea_servers([{"result": 0, "arguments": {"pkt4-ack-sent": stat(5)}}])
+def test_cli_collects_from_targets_supplied_by_the_environment(cli_runtime, http_server):
+    first = http_server(statistic_get_all=[{"result": 0, "arguments": {"pkt4-ack-sent": stat(3)}}])
+    second = http_server(statistic_get_all=[{"result": 0, "arguments": {"pkt4-ack-sent": stat(5)}}])
 
     result = cli_runtime.invoke(env={"TARGETS": f"{first.target} {second.target}"})
 
@@ -199,8 +178,8 @@ def test_cli_collects_from_targets_supplied_by_the_environment(cli_runtime, kea_
         )
 
 
-def test_cli_exits_when_every_target_has_invalid_configuration(cli_runtime, kea_servers, tmp_path):
-    kea = kea_servers()
+def test_cli_exits_when_every_target_has_invalid_configuration(cli_runtime, http_server, tmp_path):
+    kea = http_server()
     certificate = tmp_path / "client.pem"
     certificate.touch()
 
@@ -211,8 +190,8 @@ def test_cli_exits_when_every_target_has_invalid_configuration(cli_runtime, kea_
     assert cli_runtime.httpd.app is None
 
 
-def test_cli_forwards_tls_options_to_the_http_adapter(cli_runtime, kea_servers, tmp_path):
-    kea = kea_servers()
+def test_cli_forwards_tls_options_to_the_http_adapter(cli_runtime, http_server, tmp_path):
+    kea = http_server()
     certificate = tmp_path / "client.pem"
     key = tmp_path / "client.key"
     ca_bundle = tmp_path / "ca.pem"
@@ -236,8 +215,8 @@ def test_cli_forwards_tls_options_to_the_http_adapter(cli_runtime, kea_servers, 
     assert statistic_request_count(kea) == 1
 
 
-def test_wsgi_app_waits_one_interval_after_the_startup_scrape(cli_runtime, kea_servers):
-    kea = kea_servers()
+def test_wsgi_app_waits_one_interval_after_the_startup_scrape(cli_runtime, http_server):
+    kea = http_server()
     result = cli_runtime.invoke("--interval", "60", kea.target)
     assert result.exit_code == 0
 
@@ -256,8 +235,8 @@ def test_wsgi_app_waits_one_interval_after_the_startup_scrape(cli_runtime, kea_s
     assert statistic_request_count(kea) == 2
 
 
-def test_a_backwards_wall_clock_step_does_not_stall_scrapes(cli_runtime, kea_servers):
-    kea = kea_servers()
+def test_a_backwards_wall_clock_step_does_not_stall_scrapes(cli_runtime, http_server):
+    kea = http_server()
     result = cli_runtime.invoke("--interval", "60", kea.target)
     assert result.exit_code == 0
 
@@ -268,8 +247,8 @@ def test_a_backwards_wall_clock_step_does_not_stall_scrapes(cli_runtime, kea_ser
     assert statistic_request_count(kea) == 2
 
 
-def test_wsgi_app_scrapes_on_every_request_when_the_interval_is_zero(cli_runtime, kea_servers):
-    kea = kea_servers()
+def test_wsgi_app_scrapes_on_every_request_when_the_interval_is_zero(cli_runtime, http_server):
+    kea = http_server()
     result = cli_runtime.invoke("--interval", "0", kea.target)
     assert result.exit_code == 0
 
@@ -280,8 +259,8 @@ def test_wsgi_app_scrapes_on_every_request_when_the_interval_is_zero(cli_runtime
     assert statistic_request_count(kea) == 3
 
 
-def test_concurrent_wsgi_requests_share_the_interval_gate(cli_runtime, kea_servers):
-    kea = kea_servers()
+def test_concurrent_wsgi_requests_share_the_interval_gate(cli_runtime, http_server):
+    kea = http_server()
     result = cli_runtime.invoke("--interval", "60", kea.target)
     assert result.exit_code == 0
     cli_runtime.clock.monotonic_now = 1060.0
@@ -299,8 +278,8 @@ def test_concurrent_wsgi_requests_share_the_interval_gate(cli_runtime, kea_serve
     assert statistic_request_count(kea) == 2
 
 
-def test_sigint_is_ignored_before_server_shutdown(cli_runtime, kea_servers, monkeypatch):
-    kea = kea_servers()
+def test_sigint_is_ignored_before_server_shutdown(cli_runtime, http_server, monkeypatch):
+    kea = http_server()
 
     def record_signal(_signum, handler):
         cli_runtime.httpd.events.append("ignore" if handler is signal.SIG_IGN else "restore")
@@ -316,10 +295,10 @@ def test_sigint_is_ignored_before_server_shutdown(cli_runtime, kea_servers, monk
 
 def test_shutdown_failure_is_reported_and_the_signal_handler_is_restored(
     cli_runtime,
-    kea_servers,
+    http_server,
     monkeypatch,
 ):
-    kea = kea_servers()
+    kea = http_server()
     cli_runtime.httpd.shutdown_error = RuntimeError("cannot stop server")
 
     def record_signal(_signum, handler):

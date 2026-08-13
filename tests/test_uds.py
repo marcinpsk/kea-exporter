@@ -7,29 +7,12 @@ import pytest
 
 from kea_exporter import DHCPVersion
 from kea_exporter.uds import KeaConfigError, KeaSocketClient
-from tests.support import KeaControl, KeaResponse, KeaUnixSocketServer
+from tests.support import KeaResponse
 
 SUBNET4 = {"id": 1, "subnet": "198.18.1.0/24"}
 STATISTICS4 = {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]}
 CONFIG4 = {"result": 0, "arguments": {"Dhcp4": {"subnet4": [SUBNET4]}}}
 STATS4 = {"result": 0, "arguments": STATISTICS4}
-
-
-@pytest.fixture
-def unix_server(tmp_path):
-    """Start shared Kea Unix socket adapters and close them after each test."""
-    servers = []
-
-    def start(config_get=CONFIG4, statistic_get_all=STATS4):
-        path = tmp_path / f"kea-{len(servers)}.sock"
-        server = KeaUnixSocketServer(path, KeaControl(config_get, statistic_get_all))
-        servers.append(server)
-        return server
-
-    yield start
-
-    for server in servers:
-        server.close()
 
 
 def test_a_missing_socket_is_reported_by_the_scrape(tmp_path):

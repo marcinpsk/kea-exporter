@@ -9,48 +9,7 @@ from kea_exporter import DHCPVersion
 from kea_exporter.http import KeaHTTPClient
 from kea_exporter.subnets import subnet_index
 from kea_exporter.uds import KeaSocketClient
-from tests.support import KeaControl, KeaHTTPServer, KeaUnixSocketServer, _KeaUnixSocketHandler
-
-
-@pytest.fixture
-def no_proxy(monkeypatch):
-    """Keep an ambient proxy configuration out of loopback tests."""
-    monkeypatch.setenv("NO_PROXY", "*")
-    monkeypatch.setenv("no_proxy", "*")
-
-
-@pytest.fixture
-def kea_http_server(no_proxy):
-    """Start HTTP fakes and close them after each test."""
-    servers = []
-
-    def start(config_get, statistic_get_all):
-        server = KeaHTTPServer(KeaControl(config_get, statistic_get_all))
-        servers.append(server)
-        return server
-
-    yield start
-
-    for server in servers:
-        server.close()
-
-
-@pytest.fixture
-def kea_unix_socket_server(tmp_path):
-    """Start Unix socket fakes and close them after each test."""
-    servers = []
-
-    def start(config_get, statistic_get_all):
-        path = tmp_path / f"kea-{len(servers)}.sock"
-        server = KeaUnixSocketServer(path, KeaControl(config_get, statistic_get_all))
-        servers.append(server)
-        return server
-
-    yield start
-
-    for server in servers:
-        server.close()
-
+from tests.support import _KeaUnixSocketHandler
 
 DAEMON_CASES = [
     pytest.param(
@@ -91,11 +50,11 @@ def config_section(subnet_key, subnets):
 
 @pytest.mark.parametrize(("dhcp_version", "section_name", "subnet_key", "subnets"), DAEMON_CASES)
 def test_the_http_client_collects_daemon_subnets_from_the_top_level_and_every_shared_network(
-    kea_http_server, dhcp_version, section_name, subnet_key, subnets
+    http_server, dhcp_version, section_name, subnet_key, subnets
 ):
     config_get = [{"result": 0, "arguments": {section_name: config_section(subnet_key, subnets)}}]
     statistic_get_all = [{"result": 0, "arguments": {}}]
-    server = kea_http_server(config_get, statistic_get_all)
+    server = http_server(config_get, statistic_get_all)
 
     rows = list(KeaHTTPClient(server.target).stats())
 
@@ -104,11 +63,11 @@ def test_the_http_client_collects_daemon_subnets_from_the_top_level_and_every_sh
     assert rows[0][3] == {subnet["id"]: subnet for subnet in subnets}
 
 
-def test_an_empty_dhcp4_section_replaces_the_http_clients_previously_loaded_subnets(kea_http_server):
+def test_an_empty_dhcp4_section_replaces_the_http_clients_previously_loaded_subnets(http_server):
     subnet = {"id": 1, "subnet": "198.18.1.0/24"}
     initial_config = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": [subnet]}}}]
     statistic_get_all = [{"result": 0, "arguments": {}}]
-    server = kea_http_server(initial_config, statistic_get_all)
+    server = http_server(initial_config, statistic_get_all)
     client = KeaHTTPClient(server.target)
 
     first_rows = list(client.stats())
@@ -119,11 +78,11 @@ def test_an_empty_dhcp4_section_replaces_the_http_clients_previously_loaded_subn
     assert second_rows[0][3] == {}
 
 
-def test_a_response_without_a_dhcp4_section_keeps_the_http_clients_previously_loaded_subnets(kea_http_server):
+def test_a_response_without_a_dhcp4_section_keeps_the_http_clients_previously_loaded_subnets(http_server):
     subnet = {"id": 1, "subnet": "198.18.1.0/24"}
     initial_config = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": [subnet]}}}]
     statistic_get_all = [{"result": 0, "arguments": {}}]
-    server = kea_http_server(initial_config, statistic_get_all)
+    server = http_server(initial_config, statistic_get_all)
     client = KeaHTTPClient(server.target)
 
     first_rows = list(client.stats())
@@ -136,11 +95,11 @@ def test_a_response_without_a_dhcp4_section_keeps_the_http_clients_previously_lo
 
 @pytest.mark.parametrize(("dhcp_version", "section_name", "subnet_key", "subnets"), DAEMON_CASES)
 def test_the_unix_socket_client_collects_daemon_subnets_from_the_top_level_and_every_shared_network(
-    kea_unix_socket_server, dhcp_version, section_name, subnet_key, subnets
+    unix_server, dhcp_version, section_name, subnet_key, subnets
 ):
     config_get = {"result": 0, "arguments": {section_name: config_section(subnet_key, subnets)}}
     statistic_get_all = {"result": 0, "arguments": {}}
-    server = kea_unix_socket_server(config_get, statistic_get_all)
+    server = unix_server(config_get, statistic_get_all)
 
     rows = list(KeaSocketClient(server.path).stats())
 
@@ -156,7 +115,7 @@ def test_the_unix_socket_handler_stops_when_a_peer_closes_before_sending_valid_j
     def handle():
         try:
             _KeaUnixSocketHandler(server_socket, None, None)
-        except OSError as error:
+        except BaseException as error:
             errors.append(error)
 
     thread = threading.Thread(target=handle)
