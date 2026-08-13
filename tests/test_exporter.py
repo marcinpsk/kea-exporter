@@ -207,6 +207,18 @@ def test_renamed_pool_label_is_removed_on_the_next_scrape(registry):
     assert new_pool in exported(registry)
 
 
+def test_a_standalone_parse_does_not_keep_a_label_omitted_by_the_next_scrape(registry):
+    row = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    empty = (SERVER, DHCPVersion.DHCP4, {}, pool_subnets())
+    exporter = exporter_with(registry, ScriptedTarget([row], [empty], server_id=SERVER))
+
+    exporter.update()
+    exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())
+    exporter.update()
+
+    assert POOL not in exported(registry)
+
+
 def test_a_label_is_kept_when_the_scrape_fails(registry):
     target = ScriptedTarget(
         [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())],

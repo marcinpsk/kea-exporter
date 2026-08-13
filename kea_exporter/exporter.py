@@ -141,8 +141,9 @@ class Exporter:
                 for server_id, dhcp_version, arguments, subnets in stats_rows:
                     pending_updates.extend(self._parse_metric_updates(server_id, dhcp_version, arguments, subnets))
                     completed_sources.add((server_id, dhcp_version))
-                for update in pending_updates:
-                    self._set_metric(*update)
+                for metric, labelnames, source, labels, value in pending_updates:
+                    label_values = self._set_metric(metric, labelnames, labels, value)
+                    self.lifecycle.record(metric, source, label_values)
                 scraped.update(completed_sources)
                 self._report_target_recovery(target)
             except Exception as ex:
@@ -213,7 +214,7 @@ class Exporter:
             file=sys.stderr,
         )
 
-    def _set_metric(self, metric, labelnames, source: Source, labels, value):
+    def _set_metric(self, metric, labelnames, labels, value):
         """Set the value, filling any label the reading did not supply.
 
         A reading shallower than the metric's deepest scope leaves the deeper
@@ -221,8 +222,7 @@ class Exporter:
         """
         filtered = {name: str(labels.get(name, "")) for name in labelnames}
         metric.labels(**filtered).set(value)
-        label_values = tuple(filtered[name] for name in labelnames)
-        self.lifecycle.record(metric, source, label_values)
+        return tuple(filtered[name] for name in labelnames)
 
     def _report_unhandled(self, key, message):
         """Report an unhandled statistic once."""
@@ -232,8 +232,10 @@ class Exporter:
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
         """Parse Kea statistics and export them as Prometheus metrics."""
-        for update in self._parse_metric_updates(server, dhcp_version, arguments, subnets):
-            self._set_metric(*update)
+        for metric, labelnames, _source, labels, value in self._parse_metric_updates(
+            server, dhcp_version, arguments, subnets
+        ):
+            self._set_metric(metric, labelnames, labels, value)
 
     def _parse_metric_updates(self, server, dhcp_version, arguments, subnets):
         """Parse Kea statistics without publishing them."""
