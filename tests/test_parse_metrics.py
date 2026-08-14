@@ -351,7 +351,7 @@ def test_vanished_subnet_is_reported_once(exporter, capsys):
 
     captured = capsys.readouterr()
     assert captured.err.count("subnet vanished") == 1
-    assert "Ignoring metric because subnet vanished" in captured.err
+    assert "Ignoring statistic because subnet vanished" in captured.err
     assert captured.out == ""
 
 

@@ -31,8 +31,8 @@ class ScrapeReport:
     sources_total: int
     sources_succeeded: int
     statistics_received: int
-    series_updated: int
-    series_removed: int
+    label_combinations_updated: int
+    stale_labels_removed: int
     elapsed_seconds: float
 
     def summary(self) -> str:
@@ -45,8 +45,8 @@ class ScrapeReport:
             f"{target_noun} reached, "
             f"{self.sources_succeeded}/{self.sources_total} {source_noun} succeeded, "
             f"{_quantity(self.statistics_received, 'statistic', 'statistics')} received, "
-            f"{_quantity(self.series_updated, 'label combination')} updated, "
-            f"{_quantity(self.series_removed, 'stale label')} removed in {elapsed_ms} ms"
+            f"{_quantity(self.label_combinations_updated, 'label combination')} updated, "
+            f"{_quantity(self.stale_labels_removed, 'stale label')} removed in {elapsed_ms} ms"
         )
 
 
@@ -98,7 +98,7 @@ class Exporter:
         }
 
         # track unhandled statistics, to notify only once
-        self.unhandled_metrics = set()
+        self.unhandled_statistics = set()
 
         # track missing info per (server_id, dhcp_version), to notify only once
         self.subnet_missing_info_sent = {}
@@ -149,14 +149,14 @@ class Exporter:
         if target.server_id in self._failing_targets:
             return
         self._failing_targets.add(target.server_id)
-        click.echo(f"Failed to collect metrics from {target.server_id}: {type(ex).__name__}: {ex}", err=True)
+        click.echo(f"Failed to collect statistics from {target.server_id}: {type(ex).__name__}: {ex}", err=True)
 
     def _report_target_recovery(self, target: KeaTarget) -> None:
         """Close the report opened by _report_target_failure."""
         if target.server_id not in self._failing_targets:
             return
         self._failing_targets.discard(target.server_id)
-        click.echo(f"Collecting metrics from {target.server_id} again", err=True)
+        click.echo(f"Collecting statistics from {target.server_id} again", err=True)
 
     def _report_source_failure(self, failure: SourceFailure) -> None:
         """Report a failing source once, not once per scrape while it stays down."""
@@ -192,7 +192,7 @@ class Exporter:
         targets_reached = 0
         sources_total = 0
         statistics_received = 0
-        updated_series: set[tuple[int, tuple[str, ...]]] = set()
+        updated_label_combinations: set[tuple[int, tuple[str, ...]]] = set()
 
         for target in self.targets:
             try:
@@ -212,14 +212,14 @@ class Exporter:
                     target_statistics += len(arguments)
                     pending_updates.extend(self._parse_metric_updates(server_id, dhcp_version, arguments, subnets))
                     completed_sources.add((server_id, dhcp_version))
-                target_series: set[tuple[int, tuple[str, ...]]] = set()
+                target_label_combinations: set[tuple[int, tuple[str, ...]]] = set()
                 for metric, labelnames, source, labels, value in pending_updates:
                     label_values = self._set_metric(metric, labelnames, labels, value)
                     self.lifecycle.record(metric, source, label_values)
-                    target_series.add((id(metric), label_values))
+                    target_label_combinations.add((id(metric), label_values))
                 scraped.update(completed_sources)
                 statistics_received += target_statistics
-                updated_series.update(target_series)
+                updated_label_combinations.update(target_label_combinations)
                 for failure in failed_sources:
                     self._report_source_failure(failure)
                 for source in completed_sources:
@@ -228,15 +228,15 @@ class Exporter:
             except Exception as ex:
                 self._report_target_failure(target, ex)
 
-        series_removed = self.lifecycle.end_cycle(scraped, time.monotonic())
+        stale_labels_removed = self.lifecycle.end_cycle(scraped, time.monotonic())
         return ScrapeReport(
             targets_total=len(self.targets),
             targets_reached=targets_reached,
             sources_total=sources_total,
             sources_succeeded=len(scraped),
             statistics_received=statistics_received,
-            series_updated=len(updated_series),
-            series_removed=series_removed,
+            label_combinations_updated=len(updated_label_combinations),
+            stale_labels_removed=stale_labels_removed,
             elapsed_seconds=time.monotonic() - started_at,
         )
 
@@ -306,7 +306,7 @@ class Exporter:
             return
         missing_info.add(cache_entry)
         click.echo(
-            f"Ignoring metric because {subject} vanished from configuration: {detail}",
+            f"Ignoring statistic because {subject} vanished from configuration: {detail}",
             err=True,
         )
 
@@ -322,9 +322,9 @@ class Exporter:
 
     def _report_unhandled(self, key, message):
         """Report an unhandled statistic once."""
-        if key not in self.unhandled_metrics:
+        if key not in self.unhandled_statistics:
             click.echo(message, err=True)
-            self.unhandled_metrics.add(key)
+            self.unhandled_statistics.add(key)
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
         """Parse and export metrics without recording lifecycle labels.
@@ -386,7 +386,7 @@ class Exporter:
                             f"{scope.value} scope; please file an issue at {ISSUE_URL}",
                         )
                     continue
-                self._report_unhandled(key, f"Unhandled metric '{key}' please file an issue at {ISSUE_URL}")
+                self._report_unhandled(key, f"Unhandled statistic '{key}' please file an issue at {ISSUE_URL}")
                 continue
 
             updates.append(

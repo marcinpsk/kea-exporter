@@ -175,7 +175,7 @@ def test_cli_keeps_valid_metrics_when_another_reading_is_not_numeric(cli_runtime
         == 9
     )
     assert "value 'not-a-number' is not a number" in result.stderr
-    assert f"Failed to collect metrics from {kea.target}" not in result.stderr
+    assert f"Failed to collect statistics from {kea.target}" not in result.stderr
 
 
 def test_cli_redacts_credentials_from_an_unparsable_target():
@@ -227,7 +227,7 @@ def test_verbose_reports_partial_target_success(cli_runtime, http_server):
     result = cli_runtime.invoke("--verbose", unavailable.target, available.target)
 
     assert result.exit_code == 0
-    assert f"Failed to collect metrics from {unavailable.target}" in result.stderr
+    assert f"Failed to collect statistics from {unavailable.target}" in result.stderr
     assert (
         "Scrape complete: 1/2 targets reached, 1/1 source succeeded, 1 statistic received, "
         "1 label combination updated, 0 stale labels removed in 0 ms"

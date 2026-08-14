@@ -140,9 +140,11 @@ def test_update_scrapes_every_target(registry):
 def test_update_exports_what_a_target_reports(registry):
     target = InMemoryTarget(SERVER).add(DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)})
 
-    exporter_with(registry, target).update()
+    report = exporter_with(registry, target).update()
 
     assert registry.get_sample_value("kea_dhcp4_packets_sent_total", {"server": SERVER, "operation": "ack"}) == 10
+    assert report.label_combinations_updated == 1
+    assert report.stale_labels_removed == 0
 
 
 def test_a_non_numeric_reading_does_not_block_other_readings(registry, capsys):
@@ -186,7 +188,7 @@ def test_an_unhandled_statistic_is_reported_only_to_stderr(registry, capsys):
     exporter_with(registry, target).update()
 
     output = capsys.readouterr()
-    assert "Unhandled metric 'invented-statistic'" in output.err
+    assert "Unhandled statistic 'invented-statistic'" in output.err
     assert output.out == ""
 
 
@@ -214,7 +216,7 @@ def test_a_target_that_stays_down_is_reported_once(registry, capsys):
     for _ in range(5):
         exporter.update()
 
-    assert capsys.readouterr().err.count("Failed to collect metrics") == 1
+    assert capsys.readouterr().err.count("Failed to collect statistics") == 1
 
 
 def test_recovery_is_announced_and_re_arms_the_report(registry, capsys):
@@ -228,8 +230,8 @@ def test_recovery_is_announced_and_re_arms_the_report(registry, capsys):
     exporter.update()
 
     output = capsys.readouterr()
-    assert output.err.count("Failed to collect metrics") == 2
-    assert f"Collecting metrics from {SERVER} again" in output.err
+    assert output.err.count("Failed to collect statistics") == 2
+    assert f"Collecting statistics from {SERVER} again" in output.err
     assert output.out == ""
 
 
