@@ -238,27 +238,38 @@ The following features are not supported yet, help is welcome.
 Usage
 -----
 
-Pass one or multiple Kea HTTP API endpoints — either a Control-Agent URL or a
-direct DHCP daemon HTTP endpoint (Control Agent is optional for Kea 2.7.2+) —
-or Unix Domain Socket paths to the ``kea-exporter`` executable. All other
-options are optional.
+Pass one or more Kea HTTP API endpoints or Unix socket paths to the
+``kea-exporter`` executable. An HTTP endpoint can be a Control Agent URL or a
+direct DHCP daemon URL. Kea 2.7.2 and later do not require the Control Agent.
+All other options are optional.
 
 ::
 
 	Usage: kea-exporter [OPTIONS] TARGETS...
 
+	  Read Kea statistics and expose them as Prometheus metrics.
+
+	  TARGETS are Kea HTTP URLs or Unix socket paths.
+
+	  The exporter completes one scrape cycle at startup. It then serves Prometheus
+	  metrics over HTTP. Each request starts a scrape cycle unless the configured
+	  interval has not elapsed.
+
 	Options:
-	  -a, --address TEXT             Address that the exporter binds to.
-	  -p, --port INTEGER             Port that the exporter binds to.
-	  -i, --interval INTEGER         Minimal interval between two queries to Kea in
-	                                 seconds.
-	  -v, --verbose                  Report one summary for each Kea scrape.
-	  --client-cert PATH             Path to client certificate used in HTTP requests
-	  --client-key PATH              Path to client key used in HTTP requests
-	  --timeout INTEGER RANGE        Timeout for HTTP requests in seconds.  [x>=1]
-	  --stale-timeout INTEGER RANGE  Remove metrics for a server that has not
-	                                 responded for this many seconds. 0 disables
-	                                 the timeout (default).  [x>=0]
+	  -a, --address TEXT             Address to listen on.  [default: 0.0.0.0]
+	  -p, --port INTEGER             Port to listen on.  [default: 9547]
+	  -i, --interval INTEGER         Minimum interval between two Kea queries, in
+	                                 seconds.  [default: 0]
+	  -v, --verbose                  Write one summary to stderr after each Kea
+	                                 scrape.
+	  --client-cert PATH             Path to the client certificate for HTTP
+	                                 requests.
+	  --client-key PATH              Path to the client key for HTTP requests.
+	  --timeout INTEGER RANGE        Timeout for HTTP requests in seconds.
+	                                 [default: 10; x>=1]
+	  --stale-timeout INTEGER RANGE  Remove metrics for a Kea source after this many
+	                                 seconds without a response. Set to 0 to
+	                                 disable.  [default: 0; x>=0]
 	  --no-tls-verify                Disable TLS certificate verification for
 	                                 HTTPS targets (insecure).
 	  --ca-bundle PATH               Path to a CA bundle file for TLS certificate
@@ -280,7 +291,7 @@ You can also configure the exporter using environment variables:
    export CLIENT_KEY="/etc/kea-exporter/client.key"
    export STALE_TIMEOUT="300"
    export CA_BUNDLE="/etc/ssl/certs/my-ca.pem"
-   # export TLS_NO_VERIFY="1"  # insecure — disables TLS verification
+   # export TLS_NO_VERIFY="1"  # insecure, disables TLS verification
 
 
 Verbose Verification

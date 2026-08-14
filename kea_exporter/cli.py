@@ -11,14 +11,14 @@ from kea_exporter import __project__, __version__
 from kea_exporter.exporter import Exporter
 
 
-@click.command()
+@click.command(context_settings={"show_default": True})
 @click.option(
     "-a",
     "--address",
     envvar="ADDRESS",
     type=str,
     default="0.0.0.0",
-    help="Address that the exporter binds to.",
+    help="Address to listen on.",
 )
 @click.option(
     "-p",
@@ -26,7 +26,7 @@ from kea_exporter.exporter import Exporter
     envvar="PORT",
     type=int,
     default=9547,
-    help="Port that the exporter binds to.",
+    help="Port to listen on.",
 )
 @click.option(
     "-i",
@@ -34,27 +34,27 @@ from kea_exporter.exporter import Exporter
     envvar="INTERVAL",
     type=int,
     default=0,
-    help="Minimal interval between two queries to Kea in seconds.",
+    help="Minimum interval between two Kea queries, in seconds.",
 )
 @click.option(
     "-v",
     "--verbose",
     envvar="VERBOSE",
     is_flag=True,
-    help="Report one summary for each Kea scrape.",
+    help="Write one summary to stderr after each Kea scrape.",
 )
 @click.option(
     "--client-cert",
     envvar="CLIENT_CERT",
     type=click.Path(exists=True),
-    help="Path to client certificate used to in HTTP requests",
+    help="Path to the client certificate for HTTP requests.",
     required=False,
 )
 @click.option(
     "--client-key",
     envvar="CLIENT_KEY",
     type=click.Path(exists=True),
-    help="Path to client key used in HTTP requests",
+    help="Path to the client key for HTTP requests.",
     required=False,
 )
 @click.option(
@@ -69,9 +69,7 @@ from kea_exporter.exporter import Exporter
     envvar="STALE_TIMEOUT",
     type=click.IntRange(min=0),
     default=0,
-    help=(
-        "Remove metrics for a server that has not responded for this many seconds. 0 disables the timeout (default)."
-    ),
+    help="Remove metrics for a Kea source after this many seconds without a response. Set to 0 to disable.",
 )
 @click.option(
     "--no-tls-verify",
@@ -91,27 +89,13 @@ from kea_exporter.exporter import Exporter
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
 @click.version_option(prog_name=__project__, version=__version__)
 def cli(port, address, interval, verbose, **kwargs: Any):
-    """
-    Start the Kea exporter, expose Prometheus metrics over HTTP, and run
-    the main loop.
+    """Read Kea statistics and expose them as Prometheus metrics.
 
-    Instantiates the Exporter from provided keyword arguments, verifies
-    targets are configured, and collects the initial metrics. Then it starts
-    a Prometheus HTTP server bound to the given address and port, installs a
-    WSGI app that triggers exporter updates at most once per `interval`
-    seconds, prints the listening address, and blocks indefinitely to keep
-    the server running.
+    TARGETS are Kea HTTP URLs or Unix socket paths.
 
-    Parameters:
-        port (int): TCP port to bind the Prometheus HTTP server.
-        address (str): IP address or hostname to bind the Prometheus
-            HTTP server.
-        interval (int): Minimum number of seconds between consecutive
-            exporter updates.
-        verbose (bool): Report one summary after each scrape cycle.
-        **kwargs: Passed through to Exporter constructor (for example:
-            targets, client_cert, client_key, timeout, tls_no_verify,
-            ca_bundle).
+    The exporter completes one scrape cycle at startup. It then serves
+    Prometheus metrics over HTTP. Each request starts a scrape cycle unless
+    the configured interval has not elapsed.
     """
     exporter = Exporter(**kwargs)
 

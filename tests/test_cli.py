@@ -105,6 +105,29 @@ def scrape(app):
     assert body
 
 
+def test_help_explains_runtime_behavior_and_shows_defaults():
+    result = CliRunner().invoke(cli, ["--help"], prog_name="kea-exporter")
+
+    assert result.exit_code == 0
+    introduction, _options = result.output.split("\n\nOptions:\n", maxsplit=1)
+    paragraphs = [" ".join(paragraph.split()) for paragraph in introduction.split("\n\n")]
+    assert paragraphs == [
+        "Usage: kea-exporter [OPTIONS] TARGETS...",
+        "Read Kea statistics and expose them as Prometheus metrics.",
+        "TARGETS are Kea HTTP URLs or Unix socket paths.",
+        (
+            "The exporter completes one scrape cycle at startup. It then serves Prometheus metrics over HTTP. "
+            "Each request starts a scrape cycle unless the configured interval has not elapsed."
+        ),
+    ]
+    assert "Parameters:" not in result.output
+    assert "[default: 0.0.0.0]" in result.output
+    assert "[default: 9547]" in result.output
+    assert "[default: 0]" in result.output
+    assert "[default: 10; x>=1]" in result.output
+    assert "[default: 0; x>=0]" in result.output
+
+
 def test_cli_collects_metrics_before_serving(cli_runtime, http_server):
     """The registry is populated before the HTTP adapter can serve it."""
     statistics = [{"result": 0, "arguments": {"pkt4-ack-sent": stat(7)}}]
