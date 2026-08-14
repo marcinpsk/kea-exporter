@@ -74,15 +74,41 @@ def test_construction_records_the_target_without_performing_io():
 
 
 @pytest.mark.parametrize(
-    ("target", "server_id"),
+    ("target", "server_id", "expected_auth"),
     [
-        ("http://user:pass@kea.invalid", "http://kea.invalid"),
-        ("http://user:pass@kea.invalid/control?command=yes", "http://kea.invalid/control?command=yes"),
-        ("https://user:pass@kea.invalid:8443", "https://kea.invalid:8443"),
+        ("http://user:pass@kea.invalid", "http://kea.invalid", ("user", "pass")),
+        (
+            "http://user:pass@kea.invalid/control?command=yes",
+            "http://kea.invalid/control?command=yes",
+            ("user", "pass"),
+        ),
+        ("https://user:pass@kea.invalid:8443", "https://kea.invalid:8443", ("user", "pass")),
+        ("http://user@kea.invalid", "http://kea.invalid", None),
+        ("http://@kea.invalid", "http://kea.invalid", None),
+        ("http://:secret@kea.invalid", "http://kea.invalid", ("", "secret")),
     ],
 )
-def test_construction_strips_userinfo_from_the_server_id(target, server_id):
-    assert KeaHTTPClient(target).server_id == server_id
+def test_construction_strips_userinfo_from_the_server_id(target, server_id, expected_auth):
+    client = KeaHTTPClient(target)
+
+    assert client.server_id == server_id
+    assert client._auth == expected_auth
+
+
+def test_discovery_reports_when_no_supported_daemon_is_configured(http_server, capsys):
+    config = [
+        {
+            "result": 0,
+            "arguments": {"Control-agent": {"control-sockets": {"unsupported": {"socket-type": "unix"}}}},
+        }
+    ]
+    server = http_server(config, [{"result": 0, "arguments": {}}])
+
+    assert list(KeaHTTPClient(server.target).stats()) == []
+
+    output = capsys.readouterr()
+    assert f"No supported Kea daemon was discovered at {server.target}" in output.err
+    assert output.out == ""
 
 
 def test_construction_decodes_userinfo_for_basic_auth():

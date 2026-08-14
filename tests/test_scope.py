@@ -156,7 +156,9 @@ def test_global_reading_of_subnet_scoped_statistic_is_silently_skipped(exporter,
     )
 
     assert not samples(registry, "kea_dhcp4_addresses_total")
-    assert capsys.readouterr().out == ""
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ""
 
 
 def test_unknown_statistic_is_reported_once(exporter, capsys):

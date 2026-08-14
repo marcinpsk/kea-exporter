@@ -152,6 +152,40 @@ def test_cli_collects_metrics_before_serving(cli_runtime, http_server):
     assert cli_runtime.httpd.app is not None
 
 
+def test_cli_keeps_valid_metrics_when_another_reading_is_not_numeric(cli_runtime, http_server):
+    statistics = [
+        {
+            "result": 0,
+            "arguments": {
+                "pkt4-ack-sent": [["not-a-number", "2026-01-01 00:00:00.000000"]],
+                "pkt4-offer-sent": stat(9),
+            },
+        }
+    ]
+    kea = http_server(statistic_get_all=statistics)
+
+    result = cli_runtime.invoke(kea.target)
+
+    assert result.exit_code == 0
+    assert (
+        cli_runtime.registry.get_sample_value(
+            "kea_dhcp4_packets_sent_total",
+            {"server": kea.target, "operation": "offer"},
+        )
+        == 9
+    )
+    assert "value 'not-a-number' is not a number" in result.stderr
+    assert f"Failed to collect metrics from {kea.target}" not in result.stderr
+
+
+def test_cli_redacts_credentials_from_an_unparsable_target():
+    result = CliRunner().invoke(cli, ["http://user:secret@[::1"])
+
+    assert result.exit_code == 1
+    assert "Failed to initialize target <unparsable target with credentials>" in result.stderr
+    assert "secret" not in result.output
+
+
 def test_cli_announces_startup_and_shutdown(cli_runtime, http_server):
     kea = http_server()
 
@@ -415,13 +449,13 @@ def test_concurrent_wsgi_requests_share_the_interval_gate(cli_runtime, http_serv
     callers_ready = threading.Barrier(2)
 
     def concurrent_scrape():
-        callers_ready.wait()
+        callers_ready.wait(timeout=30)
         scrape(cli_runtime.httpd.app)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(concurrent_scrape) for _ in range(2)]
         for future in futures:
-            future.result()
+            future.result(timeout=30)
 
     assert statistic_request_count(kea) == 2
 

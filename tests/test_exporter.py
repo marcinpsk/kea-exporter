@@ -145,7 +145,7 @@ def test_update_exports_what_a_target_reports(registry):
     assert registry.get_sample_value("kea_dhcp4_packets_sent_total", {"server": SERVER, "operation": "ack"}) == 10
 
 
-def test_a_rejected_reading_does_not_publish_earlier_readings_from_the_same_target(registry):
+def test_a_non_numeric_reading_does_not_block_other_readings(registry, capsys):
     initial = (
         SERVER,
         DHCPVersion.DHCP4,
@@ -168,15 +168,16 @@ def test_a_rejected_reading_does_not_publish_earlier_readings_from_the_same_targ
             "kea_dhcp4_packets_sent_total",
             {"server": SERVER, "operation": "ack"},
         )
-        == 10
+        == 20
     )
     assert (
         registry.get_sample_value(
             "kea_dhcp4_packets_received_total",
             {"server": SERVER, "operation": "discover"},
         )
-        == 5
+        is None
     )
+    assert "value 'not-a-number' is not a number" in capsys.readouterr().err
 
 
 def test_an_unhandled_statistic_is_reported_only_to_stderr(registry, capsys):

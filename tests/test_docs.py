@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 
 from kea_exporter import catalogue
+from kea_exporter.exporter import Exporter
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT_DOCS = sorted((ROOT / "docs" / "agents").glob("*.md")) + [ROOT / "AGENTS.md"]
 ISSUE_TRACKER = ROOT / "docs" / "agents" / "issue-tracker.md"
+DOMAIN_GUIDE = ROOT / "docs" / "agents" / "domain.md"
 ADR_SCOPE = ROOT / "docs" / "adr" / "0001-scope-drives-metric-labels.md"
 CONTEXT = ROOT / "CONTEXT.md"
 
@@ -93,6 +95,20 @@ def test_no_glossary_definition_uses_a_word_it_tells_you_to_avoid():
     assert not offences, "CONTEXT.md definitions use terms they tell you to avoid: " + "; ".join(offences)
 
 
+def test_adr_conflict_example_is_repository_neutral():
+    text = DOMAIN_GUIDE.read_text()
+
+    assert "ADR-<number> (<topic>)" in text
+    assert "event-sourced orders" not in text
+
+
+def test_parse_metrics_documents_its_lifecycle_limit():
+    docstring = Exporter.parse_metrics.__doc__ or ""
+
+    assert "without recording lifecycle labels" in docstring
+    assert "update" in docstring
+
+
 def test_adr_0001_states_the_scope_contract_the_exporter_implements():
     """The ADR records why scope drives labels, so it has to match the exporter.
 
@@ -115,6 +131,12 @@ def test_adr_0001_states_the_scope_contract_the_exporter_implements():
     }
     for phrase, reason in required.items():
         assert phrase in text, f"docs/adr/0001 no longer states {phrase!r}: {reason}"
+
+    documented = re.search(r"(\d+) catalogue entries declare more than one scope", text)
+    assert documented, "docs/adr/0001 no longer states the multi-scope entry count as a number"
+    assert int(documented.group(1)) == len(multi), (
+        f"docs/adr/0001 says {documented.group(1)} entries declare several scopes, but the catalogue has {len(multi)}"
+    )
 
 
 def test_external_pr_filter_excludes_insiders_rather_than_listing_outsiders():

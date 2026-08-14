@@ -6,7 +6,7 @@ Every catalogue entry declares every scope at which the exporter exports its sta
 
 **Scope as advisory.** Keep the hand-written label sets and only cross-check them against scope when the exporter starts. Rejected: the label set stays a second place to get wrong, which is the failure this change exists to remove.
 
-**One deepest scope per entry.** Let an entry name only the deepest scope Kea reports the statistic at, and infer the shallower readings from it. Rejected: the exporter resolves a reading by an exact `(statistic, scope)` lookup, so an entry naming only `pool` could not serve the subnet reading of the same statistic. Twelve catalogue entries declare more than one scope, `reclaimed-leases` three.
+**One deepest scope per entry.** Let an entry name only the deepest scope Kea reports the statistic at, and infer the shallower readings from it. Rejected: the exporter resolves a reading by an exact `(statistic, scope)` lookup, so an entry naming only `pool` could not serve the subnet reading of the same statistic. 12 catalogue entries declare more than one scope, `reclaimed-leases` three.
 
 ## Consequences
 

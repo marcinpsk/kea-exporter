@@ -116,8 +116,8 @@ class Exporter:
         self._failing_sources: set[Source] = set()
 
         for target in targets:
-            url = urlparse(target)
             try:
+                url = urlparse(target)
                 if url.scheme:
                     self.targets.append(KeaHTTPClient(target, **kwargs))
                 elif url.path:
@@ -263,7 +263,13 @@ class Exporter:
 
         subnet_data = subnets.get(subnet_id, {})
         if not subnet_data:
-            self._report_missing(server_id, dhcp_version, subnet_id, f"{dhcp_version.name=}, {subnet_id=}")
+            self._report_missing(
+                server_id,
+                dhcp_version,
+                subnet_id,
+                "subnet",
+                f"{dhcp_version.name=}, {subnet_id=}",
+            )
             return None
 
         # A missing key must not reach Prometheus as the string "None", which no
@@ -285,21 +291,22 @@ class Exporter:
                 server_id,
                 dhcp_version,
                 f"{subnet_id}-{pool_kind}-{pool_index}",
-                f"{dhcp_version.name=}, {subnet_id=}, {pool_index=}",
+                pool_kind,
+                f"{dhcp_version.name=}, {subnet_id=}, {pool_kind=}, {pool_index=}",
             )
             return None
 
         labels[label] = pools[pool_index]
         return scope, statistic, labels
 
-    def _report_missing(self, server_id, dhcp_version, cache_entry, detail):
+    def _report_missing(self, server_id, dhcp_version, cache_entry, subject, detail):
         """Report a vanished subnet or pool once per server and daemon."""
         missing_info = self.subnet_missing_info_sent.setdefault((server_id, dhcp_version), set())
         if cache_entry in missing_info:
             return
         missing_info.add(cache_entry)
         click.echo(
-            f"Ignoring metric because subnet vanished from configuration: {detail}",
+            f"Ignoring metric because {subject} vanished from configuration: {detail}",
             err=True,
         )
 
@@ -320,7 +327,11 @@ class Exporter:
             self.unhandled_metrics.add(key)
 
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
-        """Parse Kea statistics and export them as Prometheus metrics."""
+        """Parse and export metrics without recording lifecycle labels.
+
+        Series published through this method are not pruned. Use update for a
+        scrape cycle that includes lifecycle bookkeeping.
+        """
         for metric, labelnames, _source, labels, value in self._parse_metric_updates(
             server, dhcp_version, arguments, subnets
         ):
@@ -344,7 +355,14 @@ class Exporter:
             reading = data[0]
             if not isinstance(reading, (list, tuple)) or len(reading) != 2:
                 continue
-            value = float(reading[0])
+            try:
+                value = float(reading[0])
+            except (TypeError, ValueError):
+                self._report_unhandled(
+                    key,
+                    f"Skipping statistic '{key}': value {reading[0]!r} is not a number",
+                )
+                continue
 
             resolved = self._resolve_selector(key, server, dhcp_version, subnets)
             if resolved is None:
@@ -402,5 +420,7 @@ def _safe_target(target: str) -> str:
         # Cut the userinfo off the netloc; parsed.hostname would drop the
         # brackets from an IPv6 host. Same reconstruction as KeaHTTPClient.
         return f"{parsed.scheme}://{parsed.netloc.rpartition('@')[2]}{parsed.path}"
-    except Exception:
-        return target  # non-URL paths (UDS socket paths) pass through unchanged
+    except ValueError:
+        if "@" not in target:
+            return target
+        return "<unparsable target with credentials>"

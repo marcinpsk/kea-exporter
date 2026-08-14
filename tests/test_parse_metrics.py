@@ -275,7 +275,9 @@ def test_never_exported_statistics_are_silent(exporter, registry, capsys):
         },
         subnets,
     )
-    assert capsys.readouterr().out == ""
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ""
     assert not samples(registry, "kea_dhcp4_addresses_assigned_total")
 
 
@@ -287,7 +289,9 @@ def test_cumulative_registered_nas_is_never_exported(exporter, capsys):
         {"cumulative-registered-nas": stat(1), "subnet[1].cumulative-registered-nas": stat(2)},
         subnets,
     )
-    assert capsys.readouterr().out == ""
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ""
 
 
 def test_unknown_dhcp_version_returns_early(exporter):
@@ -302,7 +306,9 @@ def test_malformed_statistic_value_is_skipped(exporter, capsys):
         {"pkt4-ack-sent": [], "pkt4-nak-sent": None, "pkt4-offer-sent": 5},
         {},
     )
-    assert capsys.readouterr().out == ""
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ""
 
 
 def test_a_reading_that_is_not_a_value_and_timestamp_is_skipped(exporter, registry, capsys):
@@ -322,7 +328,9 @@ def test_a_reading_that_is_not_a_value_and_timestamp_is_skipped(exporter, regist
         {},
     )
 
-    assert capsys.readouterr().out == ""
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ""
     assert sample(registry, "kea_dhcp4_packets_sent_total", server=SERVER, operation="offer") == 9
 
 
@@ -352,14 +360,20 @@ def test_vanished_pool_is_reported_once(exporter, capsys):
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"subnet[1].pool[5].assigned-addresses": stat(1)}, subnets)
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"subnet[1].pool[5].assigned-addresses": stat(2)}, subnets)
 
-    assert capsys.readouterr().err.count("subnet vanished") == 1
+    output = capsys.readouterr()
+    assert output.err.count("pool vanished") == 1
+    assert "subnet vanished" not in output.err
+    assert output.out == ""
 
 
 def test_vanished_pd_pool_is_reported(exporter, capsys):
     subnets = {1: subnet6(1, "2001:db8::/48", pd_pools=[("2001:db8:1::", 48, 64)])}
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP6, {"subnet[1].pd-pool[3].assigned-pds": stat(1)}, subnets)
 
-    assert "subnet vanished" in capsys.readouterr().err
+    output = capsys.readouterr()
+    assert "pd-pool vanished" in output.err
+    assert "subnet vanished" not in output.err
+    assert output.out == ""
 
 
 # ---------------------------------------------------------------- declared shape

@@ -172,6 +172,8 @@ class KeaHTTPClient:
             ]
 
         self._subnets_by_daemon = {daemon: self._subnets_by_daemon.get(daemon, {}) for daemon in daemons}
+        if not daemons:
+            click.echo(f"No supported Kea daemon was discovered at {self._server_id}", err=True)
 
     def _command(self, name, daemons, arguments=None):
         """Build a command for a direct daemon or the legacy Control Agent."""

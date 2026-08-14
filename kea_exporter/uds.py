@@ -121,21 +121,23 @@ class KeaSocketClient:
         the DHCP version and subnet mapping.
 
         Retrieves the server configuration and stores its "arguments" in
-        self.config. Selects the first supported DHCP section and populates
-        self.subnets as a dictionary mapping each subnet's "id" to the subnet
-        object.
+        self.config. Selects the first supported daemon section. DHCP daemons
+        get an indexed subnet map. DHCP-DDNS gets an empty subnet map.
 
         Raises:
-            KeaConfigError: If neither "Dhcp4" nor "Dhcp6" is found in
-                the configuration.
+            KeaConfigError: If no supported daemon section is found.
         """
         self.config = self.query("config-get")["arguments"]
 
         # Table order preserves first-match behavior, so DHCP4 wins when both sections exist.
         for dhcp_version, spec in DAEMON_SPECS.items():
-            if spec.section is not None and spec.subnet_key is not None and spec.section in self.config:
-                self.dhcp_version = dhcp_version
+            if spec.section is None or spec.section not in self.config:
+                continue
+            self.dhcp_version = dhcp_version
+            if spec.subnet_key is None:
+                self.subnets = {}
+            else:
                 self.subnets = subnet_index(self.config[spec.section], spec.subnet_key)
-                return
+            return
 
         raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")

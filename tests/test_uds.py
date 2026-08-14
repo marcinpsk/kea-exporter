@@ -151,6 +151,20 @@ def test_stats_yields_the_detected_daemons_statistics_and_subnets(
     ]
 
 
+def test_stats_yields_ddns_statistics_without_subnets(unix_server):
+    config = {"result": 0, "arguments": {"DhcpDdns": {}}}
+    statistics = {"update-sent": [[5, "2026-01-01 00:00:00.000000"]]}
+    server = unix_server(config, {"result": 0, "arguments": statistics})
+
+    rows = list(KeaSocketClient(server.path).stats())
+
+    assert rows == [(server.path, DHCPVersion.DDNS, statistics, {})]
+    assert server.control.requests == [
+        {"command": "config-get"},
+        {"command": "statistic-get-all"},
+    ]
+
+
 def test_stats_reloads_configuration_on_every_scrape(unix_server):
     server = unix_server()
     client = KeaSocketClient(server.path)
