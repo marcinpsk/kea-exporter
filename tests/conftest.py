@@ -19,7 +19,7 @@ def no_proxy(monkeypatch):
 
 
 @pytest.fixture
-def http_server(no_proxy):
+def http_server(no_proxy):  # noqa: ARG001 - the fixture activates proxy isolation
     """Start local Kea HTTP servers and close them after each test."""
     servers = []
 

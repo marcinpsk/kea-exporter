@@ -55,4 +55,4 @@ The tests extensively cover the new features introduced in this branch:
 3. **Timeout Parameter**
 4. **Server Labeling**
 
-Tests use Python's built-in `unittest` framework.
+Tests run with `pytest` and include tests that use pytest APIs.

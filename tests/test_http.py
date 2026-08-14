@@ -137,6 +137,7 @@ def test_discovery_reports_when_no_supported_daemon_is_configured(http_server, c
     output = capsys.readouterr()
     assert f"No supported Kea daemon was discovered at {server.target}" in output.err
     assert output.out == ""
+    assert server.control.requests == [{"command": "config-get"}]
 
 
 def test_construction_decodes_userinfo_for_basic_auth():

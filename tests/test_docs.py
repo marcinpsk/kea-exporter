@@ -20,6 +20,7 @@ ISSUE_TRACKER = ROOT / "docs" / "agents" / "issue-tracker.md"
 DOMAIN_GUIDE = ROOT / "docs" / "agents" / "domain.md"
 ADR_SCOPE = ROOT / "docs" / "adr" / "0001-scope-drives-metric-labels.md"
 CONTEXT = ROOT / "CONTEXT.md"
+TEST_README = ROOT / "tests" / "README.md"
 
 # gh subcommands whose --json field list can be checked without network access.
 GH_JSON_COMMAND = re.compile(r"gh (issue|pr) (list|view|status)\b[^`\n]*?--json ([a-zA-Z][a-zA-Z,]*)")
@@ -45,7 +46,7 @@ def test_documented_coverage_command_matches_ci():
     ci_threshold = re.search(r"--cov-fail-under=(\d+)", workflow)
     assert ci_threshold, "CI no longer sets --cov-fail-under; update this test with it"
 
-    readme = (ROOT / "tests" / "README.md").read_text()
+    readme = TEST_README.read_text()
     documented = re.search(r"^uv run pytest --cov[^\n]*", readme, re.MULTILINE)
     assert documented, "tests/README.md documents no coverage command"
 
@@ -53,6 +54,13 @@ def test_documented_coverage_command_matches_ci():
         f"documented coverage command {documented.group(0)!r} omits the CI gate "
         f"--cov-fail-under={ci_threshold.group(1)}"
     )
+
+
+def test_test_readme_names_the_test_framework_in_use():
+    text = TEST_README.read_text()
+
+    assert "Tests run with `pytest`" in text
+    assert "built-in `unittest` framework" not in text
 
 
 @pytest.mark.skipif(shutil.which("gh") is None, reason="gh CLI not installed")
@@ -162,6 +170,14 @@ def test_external_pr_filter_excludes_insiders_rather_than_listing_outsiders():
     )
 
 
+def test_issue_tracker_gh_examples_are_shell_safe():
+    commands = re.findall(r"`(gh [^`]*)`", ISSUE_TRACKER.read_text())
+
+    assert commands, "the issue tracker guide no longer contains gh examples"
+    unsafe = [command for command in commands if re.search(r"<[^>]+>", command)]
+    assert not unsafe, f"angle-bracket placeholders become shell redirections: {unsafe}"
+
+
 def test_list_issues_does_not_read_comment_bodies():
     """`gh issue list` returns at most 100 comments per issue; `gh issue view` paginates.
 
@@ -182,7 +198,7 @@ def test_list_issues_does_not_read_comment_bodies():
     )
     assert ".comments[" not in command, f"the list command still transforms comment bodies: {command!r}"
 
-    assert "gh issue view <number> --json comments" in line, (
+    assert 'gh issue view "$issue_number" --json comments' in line, (
         "the bullet must point at `gh issue view` for comment bodies, which pages past 100"
     )
 
@@ -200,7 +216,7 @@ def test_frontier_query_does_not_list_the_whole_repository():
         "repository, defaults to 30 results and loses map order; enumerate the map's "
         "children first, then inspect each with `gh issue view`"
     )
-    assert "gh issue view <child> --json" in line, "the frontier query must inspect each child individually"
+    assert 'gh issue view "$child_number" --json' in line, "the frontier query must inspect each child individually"
 
 
 def test_frontier_query_reads_every_child_and_its_state():
@@ -216,8 +232,8 @@ def test_frontier_query_reads_every_child_and_its_state():
         "the sub-issues enumeration is unpaginated, so a map with more than 30 children is silently truncated"
     )
 
-    fields = re.search(r"gh issue view <child> --json ([a-zA-Z,]+)", line)
-    assert fields, "the frontier query must inspect each child with `gh issue view <child> --json`"
+    fields = re.search(r'gh issue view "\$child_number" --json ([a-zA-Z,]+)', line)
+    assert fields, 'the frontier query must inspect each child with `gh issue view "$child_number" --json`'
     assert "state" in fields.group(1).split(","), (
         "the query selects the first open child but never requests `state`, "
         f"so openness cannot be read; requested fields are {fields.group(1)}"

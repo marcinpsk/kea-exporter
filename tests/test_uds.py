@@ -1,5 +1,6 @@
 """Behavior of the Unix socket target adapter through a local Kea server."""
 
+import inspect
 import os
 import socket
 
@@ -14,6 +15,14 @@ SUBNET4 = {"id": 1, "subnet": "198.18.1.0/24"}
 STATISTICS4 = {"pkt4-ack-sent": [[7, "2026-01-01 00:00:00.000000"]]}
 CONFIG4 = {"result": 0, "arguments": {"Dhcp4": {"subnet4": [SUBNET4]}}}
 STATS4 = {"result": 0, "arguments": STATISTICS4}
+
+
+def test_stats_documents_success_and_source_failure_results():
+    docstring = inspect.getdoc(KeaSocketClient.stats) or ""
+
+    assert "SourceStatistics" in docstring
+    assert "SourceFailure" in docstring
+    assert "statistic-get-all" in docstring
 
 
 def test_a_missing_socket_is_reported_by_the_scrape(tmp_path):

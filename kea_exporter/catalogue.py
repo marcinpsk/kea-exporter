@@ -62,7 +62,7 @@ class Entry:
     labels: dict[str, str] = field(default_factory=dict)
 
 
-def _packets(prefix: str, direction: str, operations: dict[str, str], metric: str) -> tuple[Entry, ...]:
+def _packets(prefix: str, operations: dict[str, str], metric: str) -> tuple[Entry, ...]:
     """Packet counters: one statistic per operation, all on one metric."""
     return tuple(
         Entry(f"{prefix}-{statistic}", metric, _G, {"operation": operation})
@@ -90,14 +90,12 @@ METRICS_DHCP4 = {
 CATALOGUE_DHCP4 = (
     *_packets(
         "pkt4",
-        "sent",
         {"ack-sent": "ack", "nak-sent": "nak", "offer-sent": "offer"},
         "packets_sent_total",
     ),
     # Kea 3.2 lease query responses.
     *_packets(
         "pkt4",
-        "sent",
         {
             "lease-query-response-active-sent": "lease-query-response-active",
             "lease-query-response-unassigned-sent": "lease-query-response-unassigned",
@@ -107,7 +105,6 @@ CATALOGUE_DHCP4 = (
     ),
     *_packets(
         "pkt4",
-        "received",
         {
             "discover-received": "discover",
             "offer-received": "offer",
@@ -185,7 +182,6 @@ METRICS_DHCP6 = {
 CATALOGUE_DHCP6 = (
     *_packets(
         "pkt6",
-        "sent",
         {
             "advertise-sent": "advertise",
             "reply-sent": "reply",
@@ -198,7 +194,6 @@ CATALOGUE_DHCP6 = (
     ),
     *_packets(
         "pkt6",
-        "received",
         {
             "solicit-received": "solicit",
             "advertise-received": "advertise",

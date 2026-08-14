@@ -8,7 +8,7 @@ from wsgiref.util import setup_testing_defaults
 
 import pytest
 from click.testing import CliRunner
-from prometheus_client import CollectorRegistry
+from prometheus_client import REGISTRY, CollectorRegistry
 
 from kea_exporter import __version__
 from kea_exporter.cli import cli
@@ -96,7 +96,7 @@ def scrape(app):
     setup_testing_defaults(environ)
     response = {}
 
-    def start_response(status, headers, exc_info=None):
+    def start_response(status, headers, _exc_info=None):
         response["status"] = status
         response["headers"] = headers
 
@@ -178,12 +178,15 @@ def test_cli_keeps_valid_metrics_when_another_reading_is_not_numeric(cli_runtime
     assert f"Failed to collect statistics from {kea.target}" not in result.stderr
 
 
-def test_cli_redacts_credentials_from_an_unparsable_target():
-    result = CliRunner().invoke(cli, ["http://user:secret@[::1"])
+def test_cli_redacts_credentials_from_an_unparsable_target(cli_runtime):
+    collectors_before = {metric.name for metric in REGISTRY.collect()}
+
+    result = cli_runtime.invoke("http://user:secret@[::1")
 
     assert result.exit_code == 1
     assert "Failed to initialize target <unparsable target with credentials>" in result.stderr
     assert "secret" not in result.output
+    assert {metric.name for metric in REGISTRY.collect()} == collectors_before
 
 
 def test_cli_announces_startup_and_shutdown(cli_runtime, http_server):

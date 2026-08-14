@@ -286,6 +286,8 @@ class KeaHTTPClient:
                 self._report_subnet_refresh_failure(e)
             else:
                 self._report_subnet_refresh_recovery()
+        if not self._subnets_by_daemon:
+            return
         r = requests.post(
             self._target,
             cert=self._cert,

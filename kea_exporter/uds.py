@@ -97,11 +97,10 @@ class KeaSocketClient:
         reloading the configuration.
 
         Yields:
-            tuple: (server_id, dhcp_version, arguments, subnets)
-                - server_id (str): Unix domain socket path.
-                - dhcp_version (DHCPVersion): Detected DHCP version.
-                - arguments (dict): Statistics from statistic-get-all.
-                - subnets (dict): Subnet ID to subnet config mapping.
+            SourceStatistics: The server id, daemon, arguments, and subnets
+                when statistic-get-all succeeds.
+            SourceFailure: The server id, daemon, and KeaCommandError when
+                statistic-get-all fails.
         """
         self._check_socket()
         self.reload()
