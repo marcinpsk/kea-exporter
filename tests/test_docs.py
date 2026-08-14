@@ -238,3 +238,13 @@ def test_frontier_query_reads_every_child_and_its_state():
         "the query selects the first open child but never requests `state`, "
         f"so openness cannot be read; requested fields are {fields.group(1)}"
     )
+    assert '.blockedBy.nodes[] | select(.state == "OPEN")' in line, (
+        "the frontier query must test for open blocker nodes, not the blockedBy connection object"
+    )
+
+
+def test_wayfinder_claims_require_one_session_per_map():
+    text = ISSUE_TRACKER.read_text()
+
+    assert "Run only one `/wayfinder` session per map." in text
+    assert "assignment is not an atomic claim" in text
