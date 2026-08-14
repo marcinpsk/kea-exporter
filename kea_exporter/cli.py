@@ -128,8 +128,7 @@ def cli(port, address, interval, verbose, **kwargs: Any):
                 if time.monotonic() - last_update >= interval:
                     collect()
                     last_update = time.monotonic()
-            output_array = func(environ, start_response)
-            return output_array
+                return list(func(environ, start_response))
 
         return app
 

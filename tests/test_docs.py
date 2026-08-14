@@ -103,10 +103,11 @@ def test_adr_conflict_example_is_repository_neutral():
 
 
 def test_parse_metrics_documents_its_lifecycle_limit():
-    docstring = Exporter.parse_metrics.__doc__ or ""
+    docstring = " ".join((Exporter.parse_metrics.__doc__ or "").split())
 
     assert "without recording lifecycle labels" in docstring
-    assert "update" in docstring
+    assert "New label combinations are not eligible for lifecycle pruning" in docstring
+    assert "already tracked by update remains eligible" in docstring
 
 
 def test_adr_0001_states_the_scope_contract_the_exporter_implements():

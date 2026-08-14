@@ -304,11 +304,11 @@ The exporter writes one concise summary to stderr after each scrape cycle that
 actually runs. Requests suppressed by ``--interval`` do not produce a summary::
 
     $ kea-exporter --verbose http://kea-server:8000
-    Scrape complete: 1/1 target reached, 1/1 source succeeded, 87 statistics received, 54 series updated, 0 stale series removed in 23 ms
+    Scrape complete: 1/1 target reached, 1/1 source succeeded, 87 statistics received, 54 label combinations updated, 0 stale labels removed in 23 ms
 
-The summary counts Kea statistics received and distinct Prometheus series
-updated during that scrape. Existing target failure and recovery diagnostics
-remain separate lines.
+The summary counts Kea statistics received and distinct Prometheus label
+combinations updated during that scrape. Existing target failure and recovery
+diagnostics remain separate lines.
 
 
 Configure Kea HTTP API

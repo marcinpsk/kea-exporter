@@ -45,8 +45,8 @@ class ScrapeReport:
             f"{target_noun} reached, "
             f"{self.sources_succeeded}/{self.sources_total} {source_noun} succeeded, "
             f"{_quantity(self.statistics_received, 'statistic', 'statistics')} received, "
-            f"{_quantity(self.series_updated, 'series', 'series')} updated, "
-            f"{_quantity(self.series_removed, 'stale series', 'stale series')} removed in {elapsed_ms} ms"
+            f"{_quantity(self.series_updated, 'label combination')} updated, "
+            f"{_quantity(self.series_removed, 'stale label')} removed in {elapsed_ms} ms"
         )
 
 
@@ -329,8 +329,9 @@ class Exporter:
     def parse_metrics(self, server, dhcp_version, arguments, subnets):
         """Parse and export metrics without recording lifecycle labels.
 
-        Series published through this method are not pruned. Use update for a
-        scrape cycle that includes lifecycle bookkeeping.
+        New label combinations are not eligible for lifecycle pruning. A label
+        combination already tracked by update remains eligible for pruning.
+        Use update for a complete scrape cycle.
         """
         for metric, labelnames, _source, labels, value in self._parse_metric_updates(
             server, dhcp_version, arguments, subnets

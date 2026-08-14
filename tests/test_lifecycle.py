@@ -88,7 +88,9 @@ def test_removing_a_label_that_is_already_gone_is_silent(registry, capsys):
 
     lifecycle.end_cycle({SOURCE}, now=1.0)
 
-    assert capsys.readouterr().err == ""
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == ""
 
 
 def test_an_unexpected_removal_error_is_reported_to_stderr(registry, capsys):

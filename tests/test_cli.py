@@ -3,7 +3,7 @@
 import signal
 import socket
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 from wsgiref.util import setup_testing_defaults
 
 import pytest
@@ -216,7 +216,7 @@ def test_verbose_reports_the_startup_scrape(cli_runtime, http_server, arguments,
     assert result.stderr.count("Scrape complete:") == 1
     assert (
         "Scrape complete: 1/1 target reached, 1/1 source succeeded, 1 statistic received, "
-        "1 series updated, 0 stale series removed in 0 ms"
+        "1 label combination updated, 0 stale labels removed in 0 ms"
     ) in result.stderr
 
 
@@ -230,7 +230,7 @@ def test_verbose_reports_partial_target_success(cli_runtime, http_server):
     assert f"Failed to collect metrics from {unavailable.target}" in result.stderr
     assert (
         "Scrape complete: 1/2 targets reached, 1/1 source succeeded, 1 statistic received, "
-        "1 series updated, 0 stale series removed in 0 ms"
+        "1 label combination updated, 0 stale labels removed in 0 ms"
     ) in result.stderr
 
 
@@ -260,7 +260,7 @@ def test_verbose_reports_a_failed_source_within_a_reached_target(cli_runtime, ht
     assert f"Failed to collect DHCP6 source from {kea.target}: KeaCommandError: DHCP6 unavailable" in result.stderr
     assert (
         "Scrape complete: 1/1 target reached, 1/2 sources succeeded, 1 statistic received, "
-        "1 series updated, 0 stale series removed in 0 ms"
+        "1 label combination updated, 0 stale labels removed in 0 ms"
     ) in result.stderr
 
 
@@ -402,7 +402,7 @@ def test_verbose_reports_only_scrapes_that_pass_the_interval_gate(cli_runtime, h
     assert capsys.readouterr().err.count("Scrape complete:") == 1
 
 
-def test_verbose_reports_stale_series_removed_by_a_scrape(cli_runtime, http_server, capsys):
+def test_verbose_reports_stale_labels_removed_by_a_scrape(cli_runtime, http_server, capsys):
     kea = http_server()
     result = cli_runtime.invoke("--verbose", kea.target)
     assert result.exit_code == 0
@@ -413,7 +413,7 @@ def test_verbose_reports_stale_series_removed_by_a_scrape(cli_runtime, http_serv
 
     assert (
         "Scrape complete: 1/1 target reached, 1/1 source succeeded, 0 statistics received, "
-        "0 series updated, 1 stale series removed in 0 ms"
+        "0 label combinations updated, 1 stale label removed in 0 ms"
     ) in capsys.readouterr().err
 
 
@@ -447,17 +447,82 @@ def test_concurrent_wsgi_requests_share_the_interval_gate(cli_runtime, http_serv
     assert result.exit_code == 0
     cli_runtime.clock.monotonic_now = 1060.0
     callers_ready = threading.Barrier(2)
+    errors = Queue()
 
     def concurrent_scrape():
-        callers_ready.wait(timeout=30)
-        scrape(cli_runtime.httpd.app)
+        try:
+            callers_ready.wait(timeout=15)
+            scrape(cli_runtime.httpd.app)
+        except Exception as error:
+            errors.put(error)
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(concurrent_scrape) for _ in range(2)]
-        for future in futures:
-            future.result(timeout=30)
+    workers = [threading.Thread(target=concurrent_scrape, daemon=True) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=15)
 
+    assert not [worker for worker in workers if worker.is_alive()], "concurrent scrapes did not finish"
+    if not errors.empty():
+        raise errors.get()
     assert statistic_request_count(kea) == 2
+
+
+def test_wsgi_render_and_update_share_one_lock(cli_runtime, http_server):
+    class BlockingCollector:
+        def __init__(self):
+            self.first_render = threading.Event()
+            self.second_render = threading.Event()
+            self.release_first = threading.Event()
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def describe(self):
+            return []
+
+        def collect(self):
+            with self.lock:
+                self.calls += 1
+                call = self.calls
+            if call == 1:
+                self.first_render.set()
+                if not self.release_first.wait(timeout=15):
+                    raise TimeoutError("first render was not released")
+            else:
+                self.second_render.set()
+            return []
+
+    kea = http_server()
+    result = cli_runtime.invoke("--interval", "0", kea.target)
+    assert result.exit_code == 0
+    collector = BlockingCollector()
+    cli_runtime.registry.register(collector)
+    errors = Queue()
+
+    def concurrent_scrape():
+        try:
+            scrape(cli_runtime.httpd.app)
+        except Exception as error:
+            errors.put(error)
+
+    workers = [threading.Thread(target=concurrent_scrape, daemon=True) for _ in range(2)]
+    workers[0].start()
+    try:
+        assert collector.first_render.wait(timeout=15)
+        workers[1].start()
+        second_render_started_early = collector.second_render.wait(timeout=5)
+    finally:
+        collector.release_first.set()
+        for worker in workers:
+            if worker.ident is not None:
+                worker.join(timeout=15)
+
+    assert not [worker for worker in workers if worker.is_alive()], "concurrent scrapes did not finish"
+    if not errors.empty():
+        raise errors.get()
+    assert not second_render_started_early, "another scrape started while the first response was rendering"
+    assert collector.second_render.is_set()
+    assert statistic_request_count(kea) == 3
 
 
 def test_sigint_is_ignored_before_server_shutdown(cli_runtime, http_server, monkeypatch):

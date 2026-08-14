@@ -207,14 +207,18 @@ class KeaHTTPClient:
         r.raise_for_status()
         config = r.json()
 
+        if not isinstance(config, list) or not config:
+            raise ValueError(f"Kea config-get returned malformed subnet response: {config!r}")
+
         indexed_by_daemon: dict[DHCPVersion, SubnetIndex] = {}
         for entry in config:
             if not isinstance(entry, dict):
-                continue
+                raise ValueError(f"Kea config-get returned malformed subnet entry: {entry!r}")
             if "result" not in entry:
                 raise ValueError(f"Kea config-get returned malformed subnet entry: {entry!r}")
             if entry["result"] != 0:
-                continue
+                error_text = entry.get("text") or f"result={entry['result']}"
+                raise KeaCommandError(error_text)
             args = entry.get("arguments", {})
 
             for daemon in dhcp_daemons:

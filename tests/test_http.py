@@ -66,6 +66,34 @@ def test_subnet_refresh_outage_is_reported_once_and_closed_on_recovery(http_serv
     assert output.err.count(f"Refreshed subnets for {server.target} again") == 1
 
 
+@pytest.mark.parametrize(
+    ("subnet_response", "message"),
+    [
+        pytest.param([], "malformed subnet response", id="empty-response"),
+        pytest.param([None], "malformed subnet entry", id="malformed-entry"),
+        pytest.param(
+            [{"result": 1, "text": "subnet configuration unavailable"}],
+            "subnet configuration unavailable",
+            id="command-error",
+        ),
+    ],
+)
+def test_initial_subnet_discovery_rejects_an_invalid_daemon_response(http_server, subnet_response, message):
+    configuration = [
+        {
+            "result": 0,
+            "arguments": {"Control-agent": {"control-sockets": {"dhcp4": {"socket-type": "unix"}}}},
+        }
+    ]
+    server = http_server(configuration)
+    server.control.queue("config-get", configuration, subnet_response)
+
+    with pytest.raises(ValueError, match=message):
+        list(KeaHTTPClient(server.target).stats())
+
+    assert statistic_requests(server) == []
+
+
 def test_construction_records_the_target_without_performing_io():
     client = KeaHTTPClient("http://127.0.0.1:1", timeout=30)
 
