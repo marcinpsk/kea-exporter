@@ -49,6 +49,7 @@ class LabelLifecycle:
                         gauge.remove(*label_values)
                     except Exception as e:
                         click.echo(f"Unexpected error removing gauge label: {e}", err=True)
+                        next_previous.setdefault(gauge_id, (gauge, {}))[1][label_values] = source
                 else:
                     next_previous.setdefault(gauge_id, (gauge, {}))[1][label_values] = source
 

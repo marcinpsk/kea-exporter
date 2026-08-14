@@ -1,5 +1,6 @@
 import signal
 import sys
+import threading
 import time
 from typing import Any
 
@@ -8,18 +9,6 @@ from prometheus_client import REGISTRY, make_wsgi_app, start_http_server
 
 from kea_exporter import __project__, __version__
 from kea_exporter.exporter import Exporter
-
-
-class Timer:
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.start_time = time.time()
-
-    def time_elapsed(self):
-        now_time = time.time()
-        return now_time - self.start_time
 
 
 @click.command()
@@ -100,10 +89,11 @@ def cli(port, address, interval, **kwargs: Any):
     the main loop.
 
     Instantiates the Exporter from provided keyword arguments, verifies
-    targets are configured, starts a Prometheus HTTP server bound to the
-    given address and port, installs a WSGI app that triggers exporter
-    updates at most once per `interval` seconds, prints the listening
-    address, and blocks indefinitely to keep the server running.
+    targets are configured, and collects the initial metrics. Then it starts
+    a Prometheus HTTP server bound to the given address and port, installs a
+    WSGI app that triggers exporter updates at most once per `interval`
+    seconds, prints the listening address, and blocks indefinitely to keep
+    the server running.
 
     Parameters:
         port (int): TCP port to bind the Prometheus HTTP server.
@@ -120,17 +110,22 @@ def cli(port, address, interval, **kwargs: Any):
     if not exporter.targets:
         sys.exit(1)
 
+    click.echo(f"Starting {__project__} {__version__}", err=True)
+    exporter.update()
     httpd, _ = start_http_server(port, address)
 
-    t = Timer()
+    last_update = time.monotonic()
+    update_lock = threading.Lock()
 
     def local_wsgi_app(registry):
         func = make_wsgi_app(registry, False)
 
         def app(environ, start_response):
-            if t.time_elapsed() >= interval:
-                exporter.update()
-                t.reset()
+            nonlocal last_update
+            with update_lock:
+                if time.monotonic() - last_update >= interval:
+                    exporter.update()
+                    last_update = time.monotonic()
             output_array = func(environ, start_response)
             return output_array
 

@@ -1,13 +1,162 @@
-"""Test doubles that let tests drive the real Exporter end to end.
+"""Test doubles that let tests drive the real Exporter and the real adapters.
 
-Every test that uses these exercises real Gauge objects in a real
-CollectorRegistry, so assertions read the exported series rather than a
-mirrored copy of a gauge's label list.
+The in-memory targets exercise real Gauge objects in a real CollectorRegistry,
+so assertions read the exported series rather than a mirrored copy of a gauge's
+label list. The HTTP and Unix socket servers are real servers on real sockets,
+so an adapter test covers the transport it claims to cover.
 """
+
+import json
+import os
+import socket
+import socketserver
+import threading
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from kea_exporter.exporter import Exporter
 
 TIMESTAMP = "2026-01-01 00:00:00.000000"
+
+
+@dataclass(frozen=True)
+class KeaResponse:
+    """One scripted control response, with optional transport behavior."""
+
+    body: object
+    status: int = 200
+    chunks: tuple[bytes, ...] | None = None
+    delay: float = 0
+
+
+class KeaControl:
+    """Script Kea commands once for the HTTP and Unix socket adapters."""
+
+    def __init__(self, config_get, statistic_get_all):
+        self.responses = {
+            "config-get": config_get,
+            "statistic-get-all": statistic_get_all,
+        }
+        self.requests = []
+        self._queued = defaultdict(deque)
+
+    def queue(self, command, *responses):
+        """Use the given responses before the command's stable response."""
+        self._queued[command].extend(responses)
+
+    def respond(self, request):
+        """Record a command and return its next response."""
+        self.requests.append(request)
+        command = request["command"]
+        if self._queued[command]:
+            return self._queued[command].popleft()
+        return self.responses[command]
+
+
+def _response(value):
+    """Normalize a plain payload to a scripted response."""
+    return value if isinstance(value, KeaResponse) else KeaResponse(value)
+
+
+def _response_bytes(response):
+    """Serialize one response unless the test supplied raw bytes."""
+    return response.body if isinstance(response.body, bytes) else json.dumps(response.body).encode()
+
+
+class _KeaHTTPHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.headers.append(dict(self.headers))
+        response = _response(self.server.control.respond(body))
+        if response.delay:
+            time.sleep(response.delay)
+        raw = _response_bytes(response)
+        self.send_response(response.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_args):
+        """Silence the default stderr access log."""
+
+
+class KeaHTTPServer(ThreadingHTTPServer):
+    """Expose a scripted Kea control implementation over HTTP."""
+
+    def __init__(self, control, host="127.0.0.1"):
+        super().__init__((host, 0), _KeaHTTPHandler)
+        self.control = control
+        self.headers = []
+        self.thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def target(self):
+        """Return the URL that reaches this server."""
+        host = self.server_address[0]
+        if self.address_family == socket.AF_INET6:
+            host = f"[{host}]"
+        return f"http://{host}:{self.server_address[1]}"
+
+    def close(self):
+        """Stop the worker thread and close the listening socket."""
+        self.shutdown()
+        self.server_close()
+        self.thread.join()
+
+
+class KeaIPv6HTTPServer(KeaHTTPServer):
+    """Expose the same HTTP adapter on an IPv6 loopback socket."""
+
+    address_family = socket.AF_INET6
+
+
+class _KeaUnixSocketHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        raw = b""
+        while True:
+            chunk = self.request.recv(4096)
+            if not chunk:
+                return
+            raw += chunk
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            break
+
+        response = _response(self.server.control.respond(body))
+        if response.delay:
+            time.sleep(response.delay)
+        chunks = response.chunks or (_response_bytes(response),)
+        for chunk in chunks:
+            self.request.sendall(chunk)
+
+
+class _ThreadingUnixStreamServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+class KeaUnixSocketServer(_ThreadingUnixStreamServer):
+    """Expose a scripted Kea control implementation over a Unix socket."""
+
+    def __init__(self, path, control):
+        self.path = os.fspath(path)
+        super().__init__(self.path, _KeaUnixSocketHandler)
+        self.control = control
+        self.thread = threading.Thread(target=self.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        """Stop the worker threads and remove the socket file."""
+        self.shutdown()
+        self.server_close()
+        self.thread.join()
+        if os.path.exists(self.path):
+            os.unlink(self.path)
 
 
 def stat(value):

@@ -241,16 +241,19 @@ def test_ddns_global_and_per_key_are_separate_metrics(exporter, registry):
 
 def test_unknown_ddns_per_key_statistic_is_reported(exporter, capsys):
     exporter.parse_metrics(SERVER, DHCPVersion.DDNS, {"key[example.com.].invented": stat(10)}, {})
-    assert "key[example.com.].invented" in capsys.readouterr().out
+    output = capsys.readouterr()
+    assert "key[example.com.].invented" in output.err
+    assert output.out == ""
 
 
 def test_ddns_statistic_without_a_per_key_metric_is_reported(exporter, capsys):
     """update-signed exists globally but Kea reports no per-key variant."""
     exporter.parse_metrics(SERVER, DHCPVersion.DDNS, {"key[example.com.].update-signed": stat(1)}, {})
 
-    out = capsys.readouterr().out
-    assert "update-signed" in out
-    assert "ddns-key" in out
+    output = capsys.readouterr()
+    assert "update-signed" in output.err
+    assert "ddns-key" in output.err
+    assert output.out == ""
 
 
 # ---------------------------------------------------------------- skipping
@@ -338,7 +341,10 @@ def test_vanished_subnet_is_reported_once(exporter, capsys):
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"subnet[9].assigned-addresses": stat(1)}, {})
     exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {"subnet[9].assigned-addresses": stat(2)}, {})
 
-    assert capsys.readouterr().err.count("subnet vanished") == 1
+    captured = capsys.readouterr()
+    assert captured.err.count("subnet vanished") == 1
+    assert "Ignoring metric because subnet vanished" in captured.err
+    assert captured.out == ""
 
 
 def test_vanished_pool_is_reported_once(exporter, capsys):
