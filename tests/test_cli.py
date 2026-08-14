@@ -126,6 +126,12 @@ def test_help_explains_runtime_behavior_and_shows_defaults():
     assert "[default: 0]" in result.output
     assert "[default: 10; x>=1]" in result.output
     assert "[default: 0; x>=0]" in result.output
+    options = " ".join(_options.split())
+    assert "Minimum interval between scrape cycles, in seconds." in options
+    assert "Write one summary to stderr after each scrape cycle." in options
+    assert (
+        "Remove stale labels this many seconds after a source's last success. Set to 0 to wait for its next success."
+    ) in options
 
 
 def test_cli_collects_metrics_before_serving(cli_runtime, http_server):
@@ -175,7 +181,7 @@ def test_verbose_reports_the_startup_scrape(cli_runtime, http_server, arguments,
     assert result.exit_code == 0
     assert result.stderr.count("Scrape complete:") == 1
     assert (
-        "Scrape complete: 1/1 target succeeded, 1 source, 1 statistic received, "
+        "Scrape complete: 1/1 target reached, 1/1 source succeeded, 1 statistic received, "
         "1 series updated, 0 stale series removed in 0 ms"
     ) in result.stderr
 
@@ -189,7 +195,37 @@ def test_verbose_reports_partial_target_success(cli_runtime, http_server):
     assert result.exit_code == 0
     assert f"Failed to collect metrics from {unavailable.target}" in result.stderr
     assert (
-        "Scrape complete: 1/2 targets succeeded, 1 source, 1 statistic received, "
+        "Scrape complete: 1/2 targets reached, 1/1 source succeeded, 1 statistic received, "
+        "1 series updated, 0 stale series removed in 0 ms"
+    ) in result.stderr
+
+
+def test_verbose_reports_a_failed_source_within_a_reached_target(cli_runtime, http_server):
+    configuration = [
+        {
+            "result": 0,
+            "arguments": {
+                "Control-agent": {
+                    "control-sockets": {
+                        "dhcp4": {"socket-type": "unix"},
+                        "dhcp6": {"socket-type": "unix"},
+                    }
+                }
+            },
+        }
+    ]
+    statistics = [
+        {"result": 0, "arguments": {"pkt4-ack-sent": stat(7)}},
+        {"result": 1, "text": "DHCP6 unavailable"},
+    ]
+    kea = http_server(configuration, statistics)
+
+    result = cli_runtime.invoke("--verbose", kea.target)
+
+    assert result.exit_code == 0
+    assert f"Failed to collect DHCP6 source from {kea.target}: KeaCommandError: DHCP6 unavailable" in result.stderr
+    assert (
+        "Scrape complete: 1/1 target reached, 1/2 sources succeeded, 1 statistic received, "
         "1 series updated, 0 stale series removed in 0 ms"
     ) in result.stderr
 
@@ -342,7 +378,7 @@ def test_verbose_reports_stale_series_removed_by_a_scrape(cli_runtime, http_serv
     scrape(cli_runtime.httpd.app)
 
     assert (
-        "Scrape complete: 1/1 target succeeded, 1 source, 0 statistics received, "
+        "Scrape complete: 1/1 target reached, 1/1 source succeeded, 0 statistics received, "
         "0 series updated, 1 stale series removed in 0 ms"
     ) in capsys.readouterr().err
 

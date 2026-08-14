@@ -34,14 +34,14 @@ from kea_exporter.exporter import Exporter
     envvar="INTERVAL",
     type=int,
     default=0,
-    help="Minimum interval between two Kea queries, in seconds.",
+    help="Minimum interval between scrape cycles, in seconds.",
 )
 @click.option(
     "-v",
     "--verbose",
     envvar="VERBOSE",
     is_flag=True,
-    help="Write one summary to stderr after each Kea scrape.",
+    help="Write one summary to stderr after each scrape cycle.",
 )
 @click.option(
     "--client-cert",
@@ -69,7 +69,9 @@ from kea_exporter.exporter import Exporter
     envvar="STALE_TIMEOUT",
     type=click.IntRange(min=0),
     default=0,
-    help="Remove metrics for a Kea source after this many seconds without a response. Set to 0 to disable.",
+    help=(
+        "Remove stale labels this many seconds after a source's last success. Set to 0 to wait for its next success."
+    ),
 )
 @click.option(
     "--no-tls-verify",

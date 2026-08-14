@@ -225,6 +225,8 @@ Upgrading from 0.9
   case for a mixed-case host, and an IPv6 target with credentials, such as
   ``http://user:password@[::1]:8000``, scrapes at all: the rebuilt URL was one
   ``requests`` refused to parse.
+- Lifecycle and unhandled-statistic diagnostics now go to stderr instead of
+  stdout. Update log collection that reads stdout only.
 
 
 Known Limitations
@@ -258,18 +260,18 @@ All other options are optional.
 	Options:
 	  -a, --address TEXT             Address to listen on.  [default: 0.0.0.0]
 	  -p, --port INTEGER             Port to listen on.  [default: 9547]
-	  -i, --interval INTEGER         Minimum interval between two Kea queries, in
+	  -i, --interval INTEGER         Minimum interval between scrape cycles, in
 	                                 seconds.  [default: 0]
-	  -v, --verbose                  Write one summary to stderr after each Kea
-	                                 scrape.
+	  -v, --verbose                  Write one summary to stderr after each scrape
+	                                 cycle.
 	  --client-cert PATH             Path to the client certificate for HTTP
 	                                 requests.
 	  --client-key PATH              Path to the client key for HTTP requests.
 	  --timeout INTEGER RANGE        Timeout for HTTP requests in seconds.
 	                                 [default: 10; x>=1]
-	  --stale-timeout INTEGER RANGE  Remove metrics for a Kea source after this many
-	                                 seconds without a response. Set to 0 to
-	                                 disable.  [default: 0; x>=0]
+	  --stale-timeout INTEGER RANGE  Remove stale labels this many seconds after a
+	                                 source's last success. Set to 0 to wait for
+	                                 its next success.  [default: 0; x>=0]
 	  --no-tls-verify                Disable TLS certificate verification for
 	                                 HTTPS targets (insecure).
 	  --ca-bundle PATH               Path to a CA bundle file for TLS certificate
@@ -298,11 +300,11 @@ Verbose Verification
 ////////////////////
 
 Use ``--verbose`` temporarily to verify that Kea statistics reach Prometheus.
-The exporter writes one concise summary to stderr after each scrape that
+The exporter writes one concise summary to stderr after each scrape cycle that
 actually runs. Requests suppressed by ``--interval`` do not produce a summary::
 
     $ kea-exporter --verbose http://kea-server:8000
-    Scrape complete: 1/1 target succeeded, 1 source, 87 statistics received, 54 series updated, 0 stale series removed in 23 ms
+    Scrape complete: 1/1 target reached, 1/1 source succeeded, 87 statistics received, 54 series updated, 0 stale series removed in 23 ms
 
 The summary counts Kea statistics received and distinct Prometheus series
 updated during that scrape. Existing target failure and recovery diagnostics

@@ -6,6 +6,7 @@ import socket
 
 from kea_exporter.daemon import DAEMON_SPECS
 from kea_exporter.subnets import subnet_index
+from kea_exporter.target import KeaCommandError, SourceFailure, SourceStatistics
 
 
 class KeaConfigError(Exception):
@@ -84,7 +85,7 @@ class KeaSocketClient:
             raise ValueError(f"Kea returned invalid JSON on '{command}': {e}") from e
 
         if response["result"] != 0:
-            raise ValueError(response.get("text") or f"Query '{command}' failed with result {response['result']}")
+            raise KeaCommandError(response.get("text") or f"Query '{command}' failed with result {response['result']}")
 
         return response
 
@@ -105,9 +106,14 @@ class KeaSocketClient:
         self._check_socket()
         self.reload()
 
-        arguments = self.query("statistic-get-all").get("arguments", {})
+        try:
+            response = self.query("statistic-get-all")
+        except KeaCommandError as error:
+            yield SourceFailure(self._server_id, self.dhcp_version, error)
+            return
+        arguments = response.get("arguments", {})
 
-        yield self._server_id, self.dhcp_version, arguments, self.subnets
+        yield SourceStatistics(self._server_id, self.dhcp_version, arguments, self.subnets)
 
     def reload(self):
         """

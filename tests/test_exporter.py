@@ -11,6 +11,7 @@ from prometheus_client import CollectorRegistry, generate_latest
 from kea_exporter import DHCPVersion, catalogue
 from kea_exporter.exporter import Exporter
 from kea_exporter.http import KeaHTTPClient
+from kea_exporter.target import KeaCommandError, SourceFailure
 from kea_exporter.uds import KeaSocketClient
 from tests.support import FailingTarget, InMemoryTarget, ScriptedTarget, exporter_with, stat
 
@@ -231,6 +232,21 @@ def test_recovery_is_announced_and_re_arms_the_report(registry, capsys):
     assert output.out == ""
 
 
+def test_a_source_failure_is_reported_once_until_recovery(registry, capsys):
+    failure = SourceFailure(SERVER, DHCPVersion.DHCP4, KeaCommandError("DHCP4 unavailable"))
+    recovered = (SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(1)}, {})
+    target = ScriptedTarget([failure], [failure], [recovered], [failure], server_id=SERVER)
+    exporter = exporter_with(registry, target)
+
+    for _ in range(4):
+        exporter.update()
+
+    output = capsys.readouterr()
+    assert output.err.count(f"Failed to collect DHCP4 source from {SERVER}") == 2
+    assert f"Collecting DHCP4 source from {SERVER} again" in output.err
+    assert output.out == ""
+
+
 # ------------------------------------------------------------------ stale labels
 
 
@@ -346,21 +362,21 @@ def test_the_stale_timeout_is_off_by_default(registry):
     assert Exporter(targets=[], registry=registry).lifecycle.stale_timeout == 0
 
 
-def test_dhcp6_labels_survive_a_scrape_that_only_covers_dhcp4(registry):
-    """A daemon missing from one scrape must not lose its series."""
+def test_dhcp6_labels_survive_a_scrape_where_that_source_fails(registry):
     pool6 = "2001:db8::10-2001:db8::20"
     subnets6 = {SUBNET_ID: {"subnet": "2001:db8::/64", "pools": [{"pool": pool6}]}}
     row4 = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
     row6 = (SERVER, DHCPVersion.DHCP6, {"subnet[1].pool[0].assigned-nas": stat(3)}, subnets6)
+    failed6 = SourceFailure(SERVER, DHCPVersion.DHCP6, KeaCommandError("DHCP6 unavailable"))
 
-    exporter = exporter_with(registry, ScriptedTarget([row4, row6], [row4], server_id=SERVER))
+    exporter = exporter_with(registry, ScriptedTarget([row4, row6], [row4, failed6], server_id=SERVER))
 
     exporter.update()
     assert POOL in exported(registry) and pool6 in exported(registry)
 
     exporter.update()
     assert POOL in exported(registry)
-    assert pool6 in exported(registry), "dhcp6 pool label was pruned when only dhcp4 was scraped"
+    assert pool6 in exported(registry), "DHCP6 pool label was pruned when its source failed"
 
 
 def test_no_source_from_a_target_is_scraped_when_a_later_row_fails_to_parse(registry):

@@ -6,6 +6,7 @@ import socket
 import pytest
 
 from kea_exporter import DHCPVersion
+from kea_exporter.target import KeaCommandError, SourceFailure
 from kea_exporter.uds import KeaConfigError, KeaSocketClient
 from tests.support import KeaResponse
 
@@ -77,6 +78,20 @@ def test_query_reports_a_kea_error_without_text(unix_server):
 
     with pytest.raises(ValueError, match="config-get.*result 2"):
         KeaSocketClient(server.path).query("config-get")
+
+
+def test_stats_returns_a_daemon_command_error_to_the_exporter(unix_server):
+    server = unix_server(statistic_get_all={"result": 1, "text": "DHCP4 unavailable"})
+
+    results = list(KeaSocketClient(server.path).stats())
+
+    assert len(results) == 1
+    failure = results[0]
+    assert isinstance(failure, SourceFailure)
+    assert failure.server_id == server.path
+    assert failure.daemon is DHCPVersion.DHCP4
+    assert isinstance(failure.error, KeaCommandError)
+    assert str(failure.error) == "DHCP4 unavailable"
 
 
 def test_query_uses_the_configured_socket_timeout(unix_server):

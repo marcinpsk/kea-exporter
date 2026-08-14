@@ -7,6 +7,7 @@ from prometheus_client import CollectorRegistry
 from kea_exporter import DHCPVersion
 from kea_exporter.exporter import Exporter
 from kea_exporter.http import KeaHTTPClient
+from kea_exporter.target import KeaCommandError, SourceFailure
 from tests.support import KeaResponse
 
 CONFIG4 = [{"result": 0, "arguments": {"Dhcp4": {"subnet4": []}}}]
@@ -292,7 +293,15 @@ def test_stats_rejects_a_truncated_response(http_server):
         list(KeaHTTPClient(server.target).stats())
 
 
-def test_stats_skips_a_daemon_error(http_server):
+def test_stats_returns_a_daemon_error_to_the_exporter(http_server):
     server = http_server(statistic_get_all=[{"result": 1, "text": "unavailable"}])
 
-    assert list(KeaHTTPClient(server.target).stats()) == []
+    results = list(KeaHTTPClient(server.target).stats())
+
+    assert len(results) == 1
+    failure = results[0]
+    assert isinstance(failure, SourceFailure)
+    assert failure.server_id == server.target
+    assert failure.daemon is DHCPVersion.DHCP4
+    assert isinstance(failure.error, KeaCommandError)
+    assert str(failure.error) == "unavailable"

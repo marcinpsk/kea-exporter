@@ -52,3 +52,14 @@ def test_readme_documents_every_exported_metric():
     for version in catalogue.CATALOGUE:
         for metric in catalogue.METRICS[version]:
             assert f"{catalogue.METRIC_PREFIX[version]}_{metric}" in text, metric
+
+
+def test_upgrade_notes_warn_that_diagnostics_moved_to_stderr():
+    text = README.read_text()
+    start = text.index("Upgrading from 0.9")
+    end = text.index("Known Limitations", start)
+    upgrade_notes = text[start:end]
+
+    assert "lifecycle and unhandled-statistic diagnostics" in upgrade_notes.lower()
+    assert "stderr" in upgrade_notes
+    assert "stdout" in upgrade_notes

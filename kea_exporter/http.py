@@ -11,6 +11,7 @@ import requests
 from kea_exporter import DHCPVersion
 from kea_exporter.daemon import DAEMON_SPECS, daemon_for_service
 from kea_exporter.subnets import SubnetIndex, subnet_index
+from kea_exporter.target import KeaCommandError, SourceFailure, SourceStatistics
 
 
 class KeaHTTPClient:
@@ -301,9 +302,10 @@ class KeaHTTPClient:
             # Validate each daemon entry before reading it.
             if not isinstance(entry, dict) or "result" not in entry:
                 raise ValueError(f"Kea statistic-get-all returned malformed entry for daemon {service!r}: {entry!r}")
-            # Skip daemons where Kea reported an error
             if entry["result"] != 0:
+                error_text = entry.get("text") or f"result={entry['result']}"
+                yield SourceFailure(self._server_id, daemon, KeaCommandError(error_text))
                 continue
             arguments = entry.get("arguments", {})
 
-            yield self._server_id, daemon, arguments, subnets
+            yield SourceStatistics(self._server_id, daemon, arguments, subnets)

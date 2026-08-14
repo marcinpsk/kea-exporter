@@ -10,7 +10,7 @@ from kea_exporter import DHCPVersion, catalogue
 from kea_exporter.catalogue import Scope
 from kea_exporter.http import KeaHTTPClient
 from kea_exporter.lifecycle import LabelLifecycle, Source
-from kea_exporter.target import KeaTarget
+from kea_exporter.target import KeaTarget, SourceFailure
 from kea_exporter.uds import KeaSocketClient
 
 ISSUE_URL = "https://github.com/marcinpsk/kea-exporter"
@@ -27,7 +27,8 @@ class ScrapeReport:
     """Summary of one complete scrape cycle."""
 
     targets_total: int
-    targets_succeeded: int
+    targets_reached: int
+    sources_total: int
     sources_succeeded: int
     statistics_received: int
     series_updated: int
@@ -38,10 +39,11 @@ class ScrapeReport:
         """Return the concise operator-facing summary."""
         elapsed_ms = round(self.elapsed_seconds * 1000)
         target_noun = "target" if self.targets_total == 1 else "targets"
+        source_noun = "source" if self.sources_total == 1 else "sources"
         return (
-            f"Scrape complete: {self.targets_succeeded}/{self.targets_total} "
-            f"{target_noun} succeeded, "
-            f"{_quantity(self.sources_succeeded, 'source')}, "
+            f"Scrape complete: {self.targets_reached}/{self.targets_total} "
+            f"{target_noun} reached, "
+            f"{self.sources_succeeded}/{self.sources_total} {source_noun} succeeded, "
             f"{_quantity(self.statistics_received, 'statistic', 'statistics')} received, "
             f"{_quantity(self.series_updated, 'series', 'series')} updated, "
             f"{_quantity(self.series_removed, 'stale series', 'stale series')} removed in {elapsed_ms} ms"
@@ -111,6 +113,7 @@ class Exporter:
         # server_id of every target whose last scrape failed, so a target that
         # stays down is reported once rather than once per scrape.
         self._failing_targets: set[str] = set()
+        self._failing_sources: set[Source] = set()
 
         for target in targets:
             url = urlparse(target)
@@ -155,28 +158,57 @@ class Exporter:
         self._failing_targets.discard(target.server_id)
         click.echo(f"Collecting metrics from {target.server_id} again", err=True)
 
+    def _report_source_failure(self, failure: SourceFailure) -> None:
+        """Report a failing source once, not once per scrape while it stays down."""
+        source = (failure.server_id, failure.daemon)
+        if source in self._failing_sources:
+            return
+        self._failing_sources.add(source)
+        click.echo(
+            f"Failed to collect {failure.daemon.name} source from {failure.server_id}: "
+            f"{type(failure.error).__name__}: {failure.error}",
+            err=True,
+        )
+
+    def _report_source_recovery(self, source: Source) -> None:
+        """Close the report opened by _report_source_failure."""
+        if source not in self._failing_sources:
+            return
+        self._failing_sources.discard(source)
+        server_id, daemon = source
+        click.echo(f"Collecting {daemon.name} source from {server_id} again", err=True)
+
     def update(self) -> ScrapeReport:
         """
         Fetch statistics from all configured targets and update the metrics.
 
-        A target counts as scraped only after all its rows parse successfully.
-        After all targets finish, the label lifecycle processes stale labels.
-        Returns a summary of the completed scrape cycle.
+        Successful source results publish only after all successful rows from
+        that target parse. After all targets finish, the label lifecycle
+        processes stale labels. Returns a summary of the completed scrape
+        cycle.
         """
         started_at = time.monotonic()
         scraped: set[Source] = set()
-        targets_succeeded = 0
+        targets_reached = 0
+        sources_total = 0
         statistics_received = 0
         updated_series: set[tuple[int, tuple[str, ...]]] = set()
 
         for target in self.targets:
             try:
                 # Materialise the generator before mutating any gauges.
-                stats_rows = list(target.stats())
+                source_results = list(target.stats())
+                targets_reached += 1
+                sources_total += len(source_results)
                 completed_sources: set[Source] = set()
+                failed_sources = []
                 target_statistics = 0
                 pending_updates = []
-                for server_id, dhcp_version, arguments, subnets in stats_rows:
+                for result in source_results:
+                    if isinstance(result, SourceFailure):
+                        failed_sources.append(result)
+                        continue
+                    server_id, dhcp_version, arguments, subnets = result
                     target_statistics += len(arguments)
                     pending_updates.extend(self._parse_metric_updates(server_id, dhcp_version, arguments, subnets))
                     completed_sources.add((server_id, dhcp_version))
@@ -186,9 +218,12 @@ class Exporter:
                     self.lifecycle.record(metric, source, label_values)
                     target_series.add((id(metric), label_values))
                 scraped.update(completed_sources)
-                targets_succeeded += 1
                 statistics_received += target_statistics
                 updated_series.update(target_series)
+                for failure in failed_sources:
+                    self._report_source_failure(failure)
+                for source in completed_sources:
+                    self._report_source_recovery(source)
                 self._report_target_recovery(target)
             except Exception as ex:
                 self._report_target_failure(target, ex)
@@ -196,7 +231,8 @@ class Exporter:
         series_removed = self.lifecycle.end_cycle(scraped, time.monotonic())
         return ScrapeReport(
             targets_total=len(self.targets),
-            targets_succeeded=targets_succeeded,
+            targets_reached=targets_reached,
+            sources_total=sources_total,
             sources_succeeded=len(scraped),
             statistics_received=statistics_received,
             series_updated=len(updated_series),
