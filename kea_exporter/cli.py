@@ -37,6 +37,13 @@ from kea_exporter.exporter import Exporter
     help="Minimal interval between two queries to Kea in seconds.",
 )
 @click.option(
+    "-v",
+    "--verbose",
+    envvar="VERBOSE",
+    is_flag=True,
+    help="Report one summary for each Kea scrape.",
+)
+@click.option(
     "--client-cert",
     envvar="CLIENT_CERT",
     type=click.Path(exists=True),
@@ -83,7 +90,7 @@ from kea_exporter.exporter import Exporter
 )
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
 @click.version_option(prog_name=__project__, version=__version__)
-def cli(port, address, interval, **kwargs: Any):
+def cli(port, address, interval, verbose, **kwargs: Any):
     """
     Start the Kea exporter, expose Prometheus metrics over HTTP, and run
     the main loop.
@@ -101,6 +108,7 @@ def cli(port, address, interval, **kwargs: Any):
             HTTP server.
         interval (int): Minimum number of seconds between consecutive
             exporter updates.
+        verbose (bool): Report one summary after each scrape cycle.
         **kwargs: Passed through to Exporter constructor (for example:
             targets, client_cert, client_key, timeout, tls_no_verify,
             ca_bundle).
@@ -110,9 +118,17 @@ def cli(port, address, interval, **kwargs: Any):
     if not exporter.targets:
         sys.exit(1)
 
+    def collect():
+        report = exporter.update()
+        if verbose:
+            click.echo(report.summary(), err=True)
+
     click.echo(f"Starting {__project__} {__version__}", err=True)
-    exporter.update()
-    httpd, _ = start_http_server(port, address)
+    collect()
+    try:
+        httpd, _ = start_http_server(port, address)
+    except OSError as ex:
+        raise click.ClickException(f"Cannot listen on http://{address}:{port}: {ex}") from ex
 
     last_update = time.monotonic()
     update_lock = threading.Lock()
@@ -124,7 +140,7 @@ def cli(port, address, interval, **kwargs: Any):
             nonlocal last_update
             with update_lock:
                 if time.monotonic() - last_update >= interval:
-                    exporter.update()
+                    collect()
                     last_update = time.monotonic()
             output_array = func(environ, start_response)
             return output_array

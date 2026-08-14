@@ -1,5 +1,6 @@
 import re
 import time
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import click
@@ -13,6 +14,38 @@ from kea_exporter.target import KeaTarget
 from kea_exporter.uds import KeaSocketClient
 
 ISSUE_URL = "https://github.com/marcinpsk/kea-exporter"
+
+
+def _quantity(count: int, singular: str, plural: str | None = None) -> str:
+    """Format a count with the correct singular or plural noun."""
+    noun = singular if count == 1 else plural or f"{singular}s"
+    return f"{count} {noun}"
+
+
+@dataclass(frozen=True)
+class ScrapeReport:
+    """Summary of one complete scrape cycle."""
+
+    targets_total: int
+    targets_succeeded: int
+    sources_succeeded: int
+    statistics_received: int
+    series_updated: int
+    series_removed: int
+    elapsed_seconds: float
+
+    def summary(self) -> str:
+        """Return the concise operator-facing summary."""
+        elapsed_ms = round(self.elapsed_seconds * 1000)
+        target_noun = "target" if self.targets_total == 1 else "targets"
+        return (
+            f"Scrape complete: {self.targets_succeeded}/{self.targets_total} "
+            f"{target_noun} succeeded, "
+            f"{_quantity(self.sources_succeeded, 'source')}, "
+            f"{_quantity(self.statistics_received, 'statistic', 'statistics')} received, "
+            f"{_quantity(self.series_updated, 'series', 'series')} updated, "
+            f"{_quantity(self.series_removed, 'stale series', 'stale series')} removed in {elapsed_ms} ms"
+        )
 
 
 class Exporter:
@@ -122,33 +155,54 @@ class Exporter:
         self._failing_targets.discard(target.server_id)
         click.echo(f"Collecting metrics from {target.server_id} again", err=True)
 
-    def update(self):
+    def update(self) -> ScrapeReport:
         """
         Fetch statistics from all configured targets and update the metrics.
 
         A target counts as scraped only after all its rows parse successfully.
         After all targets finish, the label lifecycle processes stale labels.
+        Returns a summary of the completed scrape cycle.
         """
+        started_at = time.monotonic()
         scraped: set[Source] = set()
+        targets_succeeded = 0
+        statistics_received = 0
+        updated_series: set[tuple[int, tuple[str, ...]]] = set()
 
         for target in self.targets:
             try:
                 # Materialise the generator before mutating any gauges.
                 stats_rows = list(target.stats())
                 completed_sources: set[Source] = set()
+                target_statistics = 0
                 pending_updates = []
                 for server_id, dhcp_version, arguments, subnets in stats_rows:
+                    target_statistics += len(arguments)
                     pending_updates.extend(self._parse_metric_updates(server_id, dhcp_version, arguments, subnets))
                     completed_sources.add((server_id, dhcp_version))
+                target_series: set[tuple[int, tuple[str, ...]]] = set()
                 for metric, labelnames, source, labels, value in pending_updates:
                     label_values = self._set_metric(metric, labelnames, labels, value)
                     self.lifecycle.record(metric, source, label_values)
+                    target_series.add((id(metric), label_values))
                 scraped.update(completed_sources)
+                targets_succeeded += 1
+                statistics_received += target_statistics
+                updated_series.update(target_series)
                 self._report_target_recovery(target)
             except Exception as ex:
                 self._report_target_failure(target, ex)
 
-        self.lifecycle.end_cycle(scraped, time.monotonic())
+        series_removed = self.lifecycle.end_cycle(scraped, time.monotonic())
+        return ScrapeReport(
+            targets_total=len(self.targets),
+            targets_succeeded=targets_succeeded,
+            sources_succeeded=len(scraped),
+            statistics_received=statistics_received,
+            series_updated=len(updated_series),
+            series_removed=series_removed,
+            elapsed_seconds=time.monotonic() - started_at,
+        )
 
     def _resolve_selector(self, key, server_id, dhcp_version, subnets):
         """Split a statistic name into its scope, its bare name, and its labels.

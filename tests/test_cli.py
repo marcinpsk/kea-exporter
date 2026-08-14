@@ -1,6 +1,7 @@
 """Behavior of the command-line entry point through a local Kea server."""
 
 import signal
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from wsgiref.util import setup_testing_defaults
@@ -11,7 +12,7 @@ from prometheus_client import CollectorRegistry
 
 from kea_exporter import __version__
 from kea_exporter.cli import cli
-from tests.support import stat
+from tests.support import KeaResponse, stat
 
 
 class _CapturingHTTPServer:
@@ -130,9 +131,44 @@ def test_cli_announces_startup_and_shutdown(cli_runtime, http_server):
     assert result.exit_code == 0
     assert f"Starting kea-exporter {__version__}" in result.stderr
     assert "Received signal, shutting down." in result.stderr
+    assert "Scrape complete:" not in result.stderr
     assert result.stdout == "Listening on http://0.0.0.0:9547\n"
     assert cli_runtime.httpd.shutdown_calls == 1
     assert cli_runtime.httpd.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("arguments", "env"),
+    [
+        pytest.param(("--verbose",), None, id="option"),
+        pytest.param((), {"VERBOSE": "1"}, id="environment"),
+    ],
+)
+def test_verbose_reports_the_startup_scrape(cli_runtime, http_server, arguments, env):
+    kea = http_server()
+
+    result = cli_runtime.invoke(*arguments, kea.target, env=env)
+
+    assert result.exit_code == 0
+    assert result.stderr.count("Scrape complete:") == 1
+    assert (
+        "Scrape complete: 1/1 target succeeded, 1 source, 1 statistic received, "
+        "1 series updated, 0 stale series removed in 0 ms"
+    ) in result.stderr
+
+
+def test_verbose_reports_partial_target_success(cli_runtime, http_server):
+    unavailable = http_server(config_get=KeaResponse({}, status=503))
+    available = http_server()
+
+    result = cli_runtime.invoke("--verbose", unavailable.target, available.target)
+
+    assert result.exit_code == 0
+    assert f"Failed to collect metrics from {unavailable.target}" in result.stderr
+    assert (
+        "Scrape complete: 1/2 targets succeeded, 1 source, 1 statistic received, "
+        "1 series updated, 0 stale series removed in 0 ms"
+    ) in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -159,6 +195,29 @@ def test_cli_uses_the_requested_listen_address(
     assert cli_runtime.httpd.port == expected_port
     assert cli_runtime.httpd.address == expected_address
     assert f"Listening on http://{expected_address}:{expected_port}" in result.stdout
+
+
+def test_cli_reports_an_occupied_listen_port_without_a_traceback(http_server, monkeypatch):
+    kea = http_server()
+    registry = CollectorRegistry()
+    monkeypatch.setattr("kea_exporter.cli.REGISTRY", registry)
+    monkeypatch.setattr("prometheus_client.REGISTRY", registry)
+
+    with socket.socket() as occupied_port:
+        occupied_port.bind(("127.0.0.1", 0))
+        occupied_port.listen()
+        port = occupied_port.getsockname()[1]
+
+        result = CliRunner().invoke(
+            cli,
+            ["--address", "127.0.0.1", "--port", str(port), kea.target],
+        )
+
+    assert result.exit_code == 1
+    assert f"Error: Cannot listen on http://127.0.0.1:{port}" in result.stderr
+    assert "Address already in use" in result.stderr
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, OSError)
 
 
 def test_cli_collects_from_targets_supplied_by_the_environment(cli_runtime, http_server):
@@ -233,6 +292,36 @@ def test_wsgi_app_waits_one_interval_after_the_startup_scrape(cli_runtime, http_
 
     scrape(cli_runtime.httpd.app)
     assert statistic_request_count(kea) == 2
+
+
+def test_verbose_reports_only_scrapes_that_pass_the_interval_gate(cli_runtime, http_server, capsys):
+    kea = http_server()
+    result = cli_runtime.invoke("--verbose", "--interval", "60", kea.target)
+    assert result.exit_code == 0
+    assert result.stderr.count("Scrape complete:") == 1
+    capsys.readouterr()
+
+    scrape(cli_runtime.httpd.app)
+    assert "Scrape complete:" not in capsys.readouterr().err
+
+    cli_runtime.clock.monotonic_now = 1060.0
+    scrape(cli_runtime.httpd.app)
+    assert capsys.readouterr().err.count("Scrape complete:") == 1
+
+
+def test_verbose_reports_stale_series_removed_by_a_scrape(cli_runtime, http_server, capsys):
+    kea = http_server()
+    result = cli_runtime.invoke("--verbose", kea.target)
+    assert result.exit_code == 0
+    kea.control.responses["statistic-get-all"] = [{"result": 0, "arguments": {}}]
+    capsys.readouterr()
+
+    scrape(cli_runtime.httpd.app)
+
+    assert (
+        "Scrape complete: 1/1 target succeeded, 1 source, 0 statistics received, "
+        "0 series updated, 1 stale series removed in 0 ms"
+    ) in capsys.readouterr().err
 
 
 def test_a_backwards_wall_clock_step_does_not_stall_scrapes(cli_runtime, http_server):

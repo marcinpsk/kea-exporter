@@ -252,6 +252,7 @@ options are optional.
 	  -p, --port INTEGER             Port that the exporter binds to.
 	  -i, --interval INTEGER         Minimal interval between two queries to Kea in
 	                                 seconds.
+	  -v, --verbose                  Report one summary for each Kea scrape.
 	  --client-cert PATH             Path to client certificate used in HTTP requests
 	  --client-key PATH              Path to client key used in HTTP requests
 	  --timeout INTEGER RANGE        Timeout for HTTP requests in seconds.  [x>=1]
@@ -272,6 +273,7 @@ You can also configure the exporter using environment variables:
    export ADDRESS="0.0.0.0"
    export PORT="9547"
    export INTERVAL="7"
+   export VERBOSE="1"
    export TIMEOUT="30"
    export TARGETS="http://router.example.com:8000"
    export CLIENT_CERT="/etc/kea-exporter/client.crt"
@@ -279,6 +281,21 @@ You can also configure the exporter using environment variables:
    export STALE_TIMEOUT="300"
    export CA_BUNDLE="/etc/ssl/certs/my-ca.pem"
    # export TLS_NO_VERIFY="1"  # insecure — disables TLS verification
+
+
+Verbose Verification
+////////////////////
+
+Use ``--verbose`` temporarily to verify that Kea statistics reach Prometheus.
+The exporter writes one concise summary to stderr after each scrape that
+actually runs. Requests suppressed by ``--interval`` do not produce a summary::
+
+    $ kea-exporter --verbose http://kea-server:8000
+    Scrape complete: 1/1 target succeeded, 1 source, 87 statistics received, 54 series updated, 0 stale series removed in 23 ms
+
+The summary counts Kea statistics received and distinct Prometheus series
+updated during that scrape. Existing target failure and recovery diagnostics
+remain separate lines.
 
 
 Configure Kea HTTP API

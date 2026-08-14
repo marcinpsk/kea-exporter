@@ -25,11 +25,13 @@ class LabelLifecycle:
             self._current[gauge_id] = (gauge, {})
         self._current[gauge_id][1][label_values] = source
 
-    def end_cycle(self, scraped: set[Source], now: float) -> None:
+    def end_cycle(self, scraped: set[Source], now: float) -> int:
         """Remove stale combinations only after a source responds or its timeout passes.
 
-        This rule keeps live series through transient scrape failures.
+        This rule keeps live series through transient scrape failures. Returns
+        the number of stale series removed from the registry.
         """
+        removed = 0
         next_previous: _Ledger = {
             gauge_id: (gauge, dict(current)) for gauge_id, (gauge, current) in self._current.items()
         }
@@ -50,6 +52,8 @@ class LabelLifecycle:
                     except Exception as e:
                         click.echo(f"Unexpected error removing gauge label: {e}", err=True)
                         next_previous.setdefault(gauge_id, (gauge, {}))[1][label_values] = source
+                    else:
+                        removed += 1
                 else:
                     next_previous.setdefault(gauge_id, (gauge, {}))[1][label_values] = source
 
@@ -57,3 +61,4 @@ class LabelLifecycle:
         self._current = {}
         for source in scraped:
             self._last_success[source] = now
+        return removed
