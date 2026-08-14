@@ -280,10 +280,13 @@ def test_concurrent_wsgi_requests_share_the_interval_gate(cli_runtime, http_serv
 
 def test_sigint_is_ignored_before_server_shutdown(cli_runtime, http_server, monkeypatch):
     kea = http_server()
+    previous_handler = object()
+    installed_handlers = []
 
     def record_signal(_signum, handler):
+        installed_handlers.append(handler)
         cli_runtime.httpd.events.append("ignore" if handler is signal.SIG_IGN else "restore")
-        return "previous handler"
+        return previous_handler
 
     monkeypatch.setattr(signal, "signal", record_signal)
 
@@ -291,6 +294,7 @@ def test_sigint_is_ignored_before_server_shutdown(cli_runtime, http_server, monk
 
     assert result.exit_code == 0
     assert cli_runtime.httpd.events == ["ignore", "shutdown", "close", "restore"]
+    assert installed_handlers == [signal.SIG_IGN, previous_handler]
 
 
 def test_shutdown_failure_is_reported_and_the_signal_handler_is_restored(
@@ -300,10 +304,13 @@ def test_shutdown_failure_is_reported_and_the_signal_handler_is_restored(
 ):
     kea = http_server()
     cli_runtime.httpd.shutdown_error = RuntimeError("cannot stop server")
+    previous_handler = object()
+    installed_handlers = []
 
     def record_signal(_signum, handler):
+        installed_handlers.append(handler)
         cli_runtime.httpd.events.append("ignore" if handler is signal.SIG_IGN else "restore")
-        return "previous handler"
+        return previous_handler
 
     monkeypatch.setattr(signal, "signal", record_signal)
 
@@ -312,3 +319,4 @@ def test_shutdown_failure_is_reported_and_the_signal_handler_is_restored(
     assert result.exit_code == 0
     assert "Error during shutdown: cannot stop server" in result.stderr
     assert cli_runtime.httpd.events == ["ignore", "shutdown", "restore"]
+    assert installed_handlers == [signal.SIG_IGN, previous_handler]
