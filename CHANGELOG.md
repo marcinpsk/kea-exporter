@@ -1,5 +1,65 @@
 
 
+0.10.0
+
+
+
+ - address full PR review findings
+
+ - align scrape diagnostics with domain terms
+
+ - close final PR review gaps
+
+ - harden metric collection edge cases
+
+ - report daemon failures per source
+
+ - improve CLI help output
+
+ - route Kea HTTP commands by endpoint
+
+ - address PR 69 review findings
+
+ - serialize interval-gated scrapes
+
+ - measure the scrape interval with a monotonic clock
+
+ - scope label tracking to scrape cycles
+
+ - publish only complete target scrapes
+
+ - stop inspecting private gauge labels
+
+ - accept a Unix socket that is writable but not readable
+
+ - log target lifecycle on stderr and report a subnet outage once
+
+ - require prometheus-client 0.22 and drop the KeyError arm
+
+ - normalise empty labels, guard readings, strip every userinfo
+
+ - bracket IPv6 hosts in logged targets and align the scope ADR
+
+ - keep the host intact when stripping credentials from a target
+
+ - strip a password from the target when the URL has no username
+
+ - close the review findings on the statistic catalogue
+
+
+
+
+
+ - improve exporter runtime diagnostics
+
+ - export prefix delegation pool statistics
+
+
+
+
+
+
+
 0.9.1
 
 
@@ -19,12 +79,6 @@
  - drop pool label from na_reuses_total and pd_reuses_total
 
  - drop pool label from na_registered_total; clarify pkt6-addr-reg-reply-received
-
-
-
-
-
- - update README/EXAMPLES for new options, add CI badge, fix .coverage gitignore
 
 
 
@@ -217,12 +271,6 @@
  - remove anchor section
 
  - add missing requests dependency
-
-
-
-
-
- - convert to pep517 style build-system
 
 
 
