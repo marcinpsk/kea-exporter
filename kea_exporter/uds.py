@@ -1,8 +1,12 @@
+"""Collect Kea statistics through a Unix domain socket."""
+
 import json
 import os
 import socket
 
-from kea_exporter import DHCPVersion
+from kea_exporter.daemon import DAEMON_SPECS
+from kea_exporter.subnets import subnet_index
+from kea_exporter.target import KeaCommandError, SourceFailure, SourceStatistics
 
 
 class KeaConfigError(Exception):
@@ -15,31 +19,19 @@ class KeaSocketClient:
         # arguments to both KeaHTTPClient and KeaSocketClient (e.g.,
         # timeout, client_cert) without errors
         """
-        Initialize the KeaSocketClient with a Unix domain socket path and
-        validate access.
+        Record the Unix domain socket path without accessing it.
 
         Parameters:
             sock_path (str): Path to the Unix domain socket used to
                 communicate with the Kea server.
 
         Description:
-            Validates that the socket exists and is readable/writable,
-            stores the absolute socket path, and initializes internal state
+            Stores the absolute socket path and initializes internal state
             (version, config, subnets, subnet_missing_info_sent,
             dhcp_version). The absolute socket path is also recorded as the
             client/server identifier.
-
-        Raises:
-            FileNotFoundError: If no socket exists at `sock_path`.
-            PermissionError: If the socket exists but is not readable and
-                writable by the current process.
         """
         super().__init__()
-
-        if not os.access(sock_path, os.F_OK):
-            raise FileNotFoundError(f"Unix domain socket does not exist at {sock_path}")
-        if not os.access(sock_path, os.R_OK | os.W_OK):
-            raise PermissionError(f"No read/write permissions on Unix domain socket at {sock_path}")
 
         self.sock_path = os.path.abspath(sock_path)
         # Use socket path as server identifier
@@ -51,6 +43,26 @@ class KeaSocketClient:
         self.subnets = None
         self.subnet_missing_info_sent = set()
         self.dhcp_version = None
+
+    @property
+    def server_id(self) -> str:
+        return self._server_id
+
+    def _check_socket(self):
+        """Fail with the reason rather than letting connect() report a bare error.
+
+        Checked per scrape, not once at construction: Kea may create the socket
+        after the exporter starts, and the scrape loop retries.
+
+        Raises:
+            FileNotFoundError: If no socket exists at the recorded path.
+            PermissionError: If the socket is not writable by the current
+                process.
+        """
+        if not os.access(self.sock_path, os.F_OK):
+            raise FileNotFoundError(f"Unix domain socket does not exist at {self.sock_path}")
+        if not os.access(self.sock_path, os.W_OK):
+            raise PermissionError(f"No write permission on Unix domain socket at {self.sock_path}")
 
     def query(self, command):
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -73,7 +85,7 @@ class KeaSocketClient:
             raise ValueError(f"Kea returned invalid JSON on '{command}': {e}") from e
 
         if response["result"] != 0:
-            raise ValueError(response.get("text") or f"Query '{command}' failed with result {response['result']}")
+            raise KeaCommandError(response.get("text") or f"Query '{command}' failed with result {response['result']}")
 
         return response
 
@@ -85,17 +97,22 @@ class KeaSocketClient:
         reloading the configuration.
 
         Yields:
-            tuple: (server_id, dhcp_version, arguments, subnets)
-                - server_id (str): Unix domain socket path.
-                - dhcp_version (DHCPVersion): Detected DHCP version.
-                - arguments (dict): Statistics from statistic-get-all.
-                - subnets (dict): Subnet ID to subnet config mapping.
+            SourceStatistics: The server id, daemon, arguments, and subnets
+                when statistic-get-all succeeds.
+            SourceFailure: The server id, daemon, and KeaCommandError when
+                statistic-get-all fails.
         """
+        self._check_socket()
         self.reload()
 
-        arguments = self.query("statistic-get-all").get("arguments", {})
+        try:
+            response = self.query("statistic-get-all")
+        except KeaCommandError as error:
+            yield SourceFailure(self._server_id, self.dhcp_version, error)
+            return
+        arguments = response.get("arguments", {})
 
-        yield self._server_id, self.dhcp_version, arguments, self.subnets
+        yield SourceStatistics(self._server_id, self.dhcp_version, arguments, self.subnets)
 
     def reload(self):
         """
@@ -103,33 +120,23 @@ class KeaSocketClient:
         the DHCP version and subnet mapping.
 
         Retrieves the server configuration and stores its "arguments" in
-        self.config. Sets self.dhcp_version to DHCPVersion.DHCP4 when a
-        "Dhcp4" section is present (using its "subnet4" list) or to
-        DHCPVersion.DHCP6 when a "Dhcp6" section is present (using its
-        "subnet6" list). Populates self.subnets as a dictionary mapping
-        each subnet's "id" to the subnet object.
+        self.config. Selects the first supported daemon section. DHCP daemons
+        get an indexed subnet map. DHCP-DDNS gets an empty subnet map.
 
         Raises:
-            KeaConfigError: If neither "Dhcp4" nor "Dhcp6" is found in
-                the configuration.
+            KeaConfigError: If no supported daemon section is found.
         """
         self.config = self.query("config-get")["arguments"]
 
-        if "Dhcp4" in self.config:
-            self.dhcp_version = DHCPVersion.DHCP4
-            subnets = self.config["Dhcp4"].get("subnet4", [])
-            self.subnets = {subnet["id"]: subnet for subnet in subnets if "id" in subnet}
-            for network in self.config["Dhcp4"].get("shared-networks", []):
-                for subnet in network.get("subnet4", []):
-                    if "id" in subnet:
-                        self.subnets[subnet["id"]] = subnet
-        elif "Dhcp6" in self.config:
-            self.dhcp_version = DHCPVersion.DHCP6
-            subnets = self.config["Dhcp6"].get("subnet6", [])
-            self.subnets = {subnet["id"]: subnet for subnet in subnets if "id" in subnet}
-            for network in self.config["Dhcp6"].get("shared-networks", []):
-                for subnet in network.get("subnet6", []):
-                    if "id" in subnet:
-                        self.subnets[subnet["id"]] = subnet
-        else:
-            raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")
+        # Table order preserves first-match behavior, so DHCP4 wins when both sections exist.
+        for dhcp_version, spec in DAEMON_SPECS.items():
+            if spec.section is None or spec.section not in self.config:
+                continue
+            self.dhcp_version = dhcp_version
+            if spec.subnet_key is None:
+                self.subnets = {}
+            else:
+                self.subnets = subnet_index(self.config[spec.section], spec.subnet_key)
+            return
+
+        raise KeaConfigError(f"Socket {self.sock_path} has no supported configuration")

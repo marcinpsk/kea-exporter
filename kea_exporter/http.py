@@ -1,3 +1,5 @@
+"""Collect Kea statistics through its HTTP control API."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -7,6 +9,9 @@ import click
 import requests
 
 from kea_exporter import DHCPVersion
+from kea_exporter.daemon import DAEMON_SPECS, daemon_for_service
+from kea_exporter.subnets import SubnetIndex, subnet_index
+from kea_exporter.target import KeaCommandError, SourceFailure, SourceStatistics
 
 
 class KeaHTTPClient:
@@ -23,8 +28,8 @@ class KeaHTTPClient:
         # kwargs allows passing additional arguments from CLI without breaking
         # this class
         """
-        Create a KeaHTTPClient configured to communicate with a Kea server
-        and initialize its module and subnet caches.
+        Create a KeaHTTPClient configured to communicate with a Kea server.
+        Construction performs no I/O.
 
         Parameters:
             target (str): Kea server URL; may include embedded credentials
@@ -46,21 +51,27 @@ class KeaHTTPClient:
                 timeout, client_cert) without errors.
 
         Notes:
-            Initializes internal state (modules, subnet maps) and triggers
-            discovery of available modules and subnets.
+            The first stats() call discovers available daemons and subnets.
         """
         super().__init__()
 
         # Parse URL to extract credentials
         parsed = urlparse(target)
 
-        # Extract basic auth from URL if present
-        if parsed.username and parsed.password:
-            self._auth = (unquote(parsed.username), unquote(parsed.password))
-            # Remove credentials from URL for actual requests and server ID
-            netloc_without_auth = parsed.hostname
-            if parsed.port:
-                netloc_without_auth = f"{netloc_without_auth}:{parsed.port}"
+        # Any userinfo comes out of the URL: the server id below becomes the
+        # `server` label on every series. Test the delimiter rather than the
+        # parts, because urlparse reports an empty username for both
+        # "http://:secret@host" and "http://@host".
+        if "@" in parsed.netloc:
+            # requests derives no auth from a username with no password, so
+            # neither do we, or stripping the URL would start sending one.
+            self._auth = (
+                (unquote(parsed.username or ""), unquote(parsed.password)) if parsed.password is not None else None
+            )
+            # Cut the userinfo off the netloc rather than rebuilding it from
+            # parsed.hostname, which drops the brackets from an IPv6 host and
+            # leaves a URL requests refuses to parse.
+            netloc_without_auth = parsed.netloc.rpartition("@")[2]
             self._target = urlunparse(
                 (parsed.scheme, netloc_without_auth, parsed.path, parsed.params, parsed.query, parsed.fragment)
             )
@@ -90,22 +101,23 @@ class KeaHTTPClient:
             self._verify = ca_bundle
         else:
             self._verify = True
-        self.modules = []
-        self.subnets = {}
-        self.subnets6 = {}
+        self._subnets_by_daemon: dict[DHCPVersion, SubnetIndex] = {}
+        self._discovered = False
+        self._through_control_agent = False
+        self._subnet_refresh_failed = False
 
-        self.load_modules()
-        self.load_subnets()
+    @property
+    def server_id(self) -> str:
+        return self._server_id
 
     def load_modules(self):
         """
-        Discover available Kea services and populate self.modules.
+        Discover available Kea services and populate the daemon map.
 
-        Queries the server configuration and fills self.modules with the
-        detected service names. Prefers discovery via the Control-agent's
-        `control-sockets` entry when present; otherwise inspects top-level
-        service keys case-insensitively and adds any of "dhcp4", "dhcp6",
-        or "ddns" as found. Treats the legacy key "d2" as "ddns".
+        Queries the server configuration and records the detected daemons.
+        Prefers discovery via the Control-agent's
+        `control-sockets` entry when present; otherwise matches the top-level
+        direct-daemon configuration sections case-insensitively.
         """
         r = requests.post(
             self._target,
@@ -129,54 +141,58 @@ class KeaHTTPClient:
         config_args = config[0].get("arguments", {})
 
         # Try Control Agent discovery first (legacy)
-        control_sockets = config_args.get("Control-agent", {}).get("control-sockets", [])
+        control_agent = config_args.get("Control-agent")
+        self._through_control_agent = isinstance(control_agent, dict)
+        control_sockets = control_agent.get("control-sockets", []) if self._through_control_agent else []
 
         # control-sockets can be either a list (legacy) or a dict
         # (proper Kea API)
         if isinstance(control_sockets, dict):
             # Extract service names from dict keys
-            modules = list(control_sockets.keys())
+            services = list(control_sockets.keys())
         else:
             # Use list as-is
-            modules = control_sockets
+            services = control_sockets
 
-        # Set modules if discovery succeeded
-        if modules:
-            self.modules = modules
+        if services:
+            daemons = []
+            for service in services:
+                if not isinstance(service, str):
+                    continue
+                daemon = daemon_for_service(service)
+                if daemon is not None and daemon not in daemons:
+                    daemons.append(daemon)
         else:
-            # Fallback for setups without Control Agent (Kea 2.7.2+ and
-            # newer may not have it)
-            # Normalize keys to lowercase for case-insensitive detection
+            # Direct daemon endpoints return their configuration section.
             lower_args = {k.lower(): v for k, v in config_args.items()}
-            for service in ["dhcp4", "dhcp6", "ddns", "d2"]:
-                if service in lower_args:
-                    # Normalize d2 to ddns
-                    if service == "d2":
-                        self.modules.append("ddns")
-                    else:
-                        self.modules.append(service)
+            daemons = [
+                daemon
+                for daemon, spec in DAEMON_SPECS.items()
+                if spec.section is not None and spec.section.lower() in lower_args
+            ]
 
-    @staticmethod
-    def _collect_subnets(dhcp_config, subnet_key):
-        """Yield all subnets from top-level and shared-networks in a DHCP config section."""
-        yield from dhcp_config.get(subnet_key, [])
-        for network in dhcp_config.get("shared-networks", []):
-            yield from network.get(subnet_key, [])
+        self._subnets_by_daemon = {daemon: self._subnets_by_daemon.get(daemon, {}) for daemon in daemons}
+        if not daemons:
+            click.echo(f"No supported Kea daemon was discovered at {self._server_id}", err=True)
+
+    def _command(self, name, daemons, arguments=None):
+        """Build a command for a direct daemon or the legacy Control Agent."""
+        command = {"command": name}
+        if arguments is not None:
+            command["arguments"] = arguments
+        if self._through_control_agent:
+            command["service"] = [DAEMON_SPECS[daemon].service for daemon in daemons]
+        return command
 
     def load_subnets(self):
         """
-        Load IPv4 and IPv6 subnet definitions for configured DHCP modules
-        into the instance maps.
+        Load subnet definitions for every discovered DHCP daemon.
 
-        Fetches configuration for any DHCP modules present in self.modules
-        (only "dhcp4" and "dhcp6" are considered) and replaces self.subnets
-        with IPv4 subnet entries keyed by their `id` and self.subnets6 with
-        IPv6 subnet entries keyed by their `id`. Includes subnets from both
-        top-level configuration and shared-networks. If no DHCP modules are
-        configured, the method returns without modifying state.
+        Replaces the subnet index when Kea returns that daemon's section.
+        A missing section keeps the last successful index.
         """
-        dhcp_modules = [m for m in self.modules if m in ["dhcp4", "dhcp6"]]
-        if not dhcp_modules:
+        dhcp_daemons = [daemon for daemon in self._subnets_by_daemon if DAEMON_SPECS[daemon].subnet_key is not None]
+        if not dhcp_daemons:
             return
 
         r = requests.post(
@@ -184,48 +200,61 @@ class KeaHTTPClient:
             cert=self._cert,
             auth=self._auth,
             verify=self._verify,
-            json={"command": "config-get", "service": dhcp_modules},
+            json=self._command("config-get", dhcp_daemons),
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
         r.raise_for_status()
         config = r.json()
 
-        new_subnets = {}
-        new_subnets6 = {}
-        dhcp4_seen = False
-        dhcp6_seen = False
-        for module in config:
-            if not isinstance(module, dict):
-                continue
-            if "result" not in module:
-                raise ValueError(f"Kea config-get returned malformed subnet entry: {module!r}")
-            if module["result"] != 0:
-                continue
-            args = module.get("arguments", {})
+        if not isinstance(config, list) or not config:
+            raise ValueError(f"Kea config-get returned malformed subnet response: {config!r}")
 
-            if "Dhcp4" in args:
-                dhcp4_seen = True
-                new_subnets.update({s["id"]: s for s in self._collect_subnets(args["Dhcp4"], "subnet4") if "id" in s})
-            if "Dhcp6" in args:
-                dhcp6_seen = True
-                new_subnets6.update({s["id"]: s for s in self._collect_subnets(args["Dhcp6"], "subnet6") if "id" in s})
+        indexed_by_daemon: dict[DHCPVersion, SubnetIndex] = {}
+        for entry in config:
+            if not isinstance(entry, dict):
+                raise ValueError(f"Kea config-get returned malformed subnet entry: {entry!r}")
+            if "result" not in entry:
+                raise ValueError(f"Kea config-get returned malformed subnet entry: {entry!r}")
+            if entry["result"] != 0:
+                error_text = entry.get("text") or f"result={entry['result']}"
+                raise KeaCommandError(error_text)
+            args = entry.get("arguments", {})
 
-        if dhcp4_seen:
-            self.subnets = new_subnets
-        if dhcp6_seen:
-            self.subnets6 = new_subnets6
+            for daemon in dhcp_daemons:
+                spec = DAEMON_SPECS[daemon]
+                if spec.section is not None and spec.subnet_key is not None and spec.section in args:
+                    indexed_by_daemon.setdefault(daemon, {}).update(subnet_index(args[spec.section], spec.subnet_key))
+
+        for daemon, subnets in indexed_by_daemon.items():
+            self._subnets_by_daemon[daemon] = subnets
+
+    def _report_subnet_refresh_failure(self, ex: Exception) -> None:
+        """Report the first failed subnet refresh in an outage."""
+        if self._subnet_refresh_failed:
+            return
+        self._subnet_refresh_failed = True
+        click.echo(
+            f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(ex).__name__}: {ex}",
+            err=True,
+        )
+
+    def _report_subnet_refresh_recovery(self) -> None:
+        """Close the report opened by _report_subnet_refresh_failure."""
+        if not self._subnet_refresh_failed:
+            return
+        self._subnet_refresh_failed = False
+        click.echo(f"Refreshed subnets for {self._server_id} again", err=True)
 
     def stats(self):
         # Reload subnets on update in case of configurational update
         """
         Fetch statistics from the Kea server and yield a record for each
-        discovered module.
+        discovered daemon.
 
-        Each yielded record corresponds to a module in the client's
-        discovered module list and contains the server identifier, the
-        module's DHCP version, the module-specific statistics/arguments,
-        and the relevant subnet mapping. For the DDNS module the subnet
+        Each yielded record corresponds to one discovered daemon and contains
+        the server identifier, the daemon identity, the daemon statistics,
+        and the relevant subnet mapping. For the DDNS daemon the subnet
         mapping is an empty dict.
 
         Returns:
@@ -236,61 +265,55 @@ class KeaHTTPClient:
                 - dhcp_version (DHCPVersion): enum value indicating DHCP4,
                   DHCP6, or DDNS,
                 - arguments (dict): statistics/arguments returned by the
-                  module,
+                  daemon,
                 - subnets (dict): mapping of subnet id to subnet definition
                   (empty for DDNS).
         """
-        # Reload subnets on every scrape to pick up runtime config changes
-        # (e.g. subnets added/removed via config-set). This costs one extra
-        # HTTP request per scrape but avoids stale subnet labels.
-        # Best-effort: don't abort the scrape if subnet refresh fails.
-        try:
+        if not self._discovered:
+            # First scrape: nothing can be read until the daemons are known, so
+            # a failure here belongs to the caller.
+            self.load_modules()
             self.load_subnets()
-        except Exception as e:
-            click.echo(
-                f"Warning: failed to refresh subnets for {self._server_id}, using cached data: {type(e).__name__}: {e}",
-                err=True,
-            )
+            self._discovered = True
+        else:
+            # Reload subnets on every scrape to pick up runtime config changes
+            # (e.g. subnets added/removed via config-set). This costs one extra
+            # HTTP request per scrape but avoids stale subnet labels.
+            # Best-effort: don't abort the scrape if subnet refresh fails.
+            try:
+                self.load_subnets()
+            except Exception as e:
+                self._report_subnet_refresh_failure(e)
+            else:
+                self._report_subnet_refresh_recovery()
+        if not self._subnets_by_daemon:
+            return
         r = requests.post(
             self._target,
             cert=self._cert,
             auth=self._auth,
             verify=self._verify,
-            json={
-                "command": "statistic-get-all",
-                "arguments": {},
-                "service": self.modules,
-            },
+            json=self._command("statistic-get-all", self._subnets_by_daemon, arguments={}),
             headers={"Content-Type": "application/json"},
             timeout=self.timeout,
         )
         r.raise_for_status()
         response = r.json()
 
-        for index, module in enumerate(self.modules):
-            if module == "dhcp4":
-                dhcp_version = DHCPVersion.DHCP4
-                subnets = self.subnets
-            elif module == "dhcp6":
-                dhcp_version = DHCPVersion.DHCP6
-                subnets = self.subnets6
-            elif module == "ddns":
-                dhcp_version = DHCPVersion.DDNS
-                subnets = {}  # DDNS doesn't have subnets
-            else:
-                continue
-
+        for index, (daemon, subnets) in enumerate(self._subnets_by_daemon.items()):
+            service = DAEMON_SPECS[daemon].service
             if index >= len(response):
                 raise ValueError(
-                    f"Kea statistic-get-all response is missing entry for module {module!r} at index {index}"
+                    f"Kea statistic-get-all response is missing entry for daemon {service!r} at index {index}"
                 )
             entry = response[index]
-            # Validate per-module entry shape
+            # Validate each daemon entry before reading it.
             if not isinstance(entry, dict) or "result" not in entry:
-                raise ValueError(f"Kea statistic-get-all returned malformed entry for module {module!r}: {entry!r}")
-            # Skip modules where Kea reported an error
+                raise ValueError(f"Kea statistic-get-all returned malformed entry for daemon {service!r}: {entry!r}")
             if entry["result"] != 0:
+                error_text = entry.get("text") or f"result={entry['result']}"
+                yield SourceFailure(self._server_id, daemon, KeaCommandError(error_text))
                 continue
             arguments = entry.get("arguments", {})
 
-            yield self._server_id, dhcp_version, arguments, subnets
+            yield SourceStatistics(self._server_id, daemon, arguments, subnets)

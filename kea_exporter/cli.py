@@ -1,5 +1,6 @@
 import signal
 import sys
+import threading
 import time
 from typing import Any
 
@@ -10,26 +11,14 @@ from kea_exporter import __project__, __version__
 from kea_exporter.exporter import Exporter
 
 
-class Timer:
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.start_time = time.time()
-
-    def time_elapsed(self):
-        now_time = time.time()
-        return now_time - self.start_time
-
-
-@click.command()
+@click.command(context_settings={"show_default": True})
 @click.option(
     "-a",
     "--address",
     envvar="ADDRESS",
     type=str,
     default="0.0.0.0",
-    help="Address that the exporter binds to.",
+    help="Address to listen on.",
 )
 @click.option(
     "-p",
@@ -37,7 +26,7 @@ class Timer:
     envvar="PORT",
     type=int,
     default=9547,
-    help="Port that the exporter binds to.",
+    help="Port to listen on.",
 )
 @click.option(
     "-i",
@@ -45,20 +34,27 @@ class Timer:
     envvar="INTERVAL",
     type=int,
     default=0,
-    help="Minimal interval between two queries to Kea in seconds.",
+    help="Minimum interval between scrape cycles, in seconds.",
+)
+@click.option(
+    "-v",
+    "--verbose",
+    envvar="VERBOSE",
+    is_flag=True,
+    help="Write one summary to stderr after each scrape cycle.",
 )
 @click.option(
     "--client-cert",
     envvar="CLIENT_CERT",
     type=click.Path(exists=True),
-    help="Path to client certificate used to in HTTP requests",
+    help="Path to the client certificate for HTTP requests.",
     required=False,
 )
 @click.option(
     "--client-key",
     envvar="CLIENT_KEY",
     type=click.Path(exists=True),
-    help="Path to client key used in HTTP requests",
+    help="Path to the client key for HTTP requests.",
     required=False,
 )
 @click.option(
@@ -74,7 +70,7 @@ class Timer:
     type=click.IntRange(min=0),
     default=0,
     help=(
-        "Remove metrics for a server that has not responded for this many seconds. 0 disables the timeout (default)."
+        "Remove stale labels this many seconds after a source's last success. Set to 0 to wait for its next success."
     ),
 )
 @click.option(
@@ -94,45 +90,45 @@ class Timer:
 )
 @click.argument("targets", envvar="TARGETS", nargs=-1, required=True)
 @click.version_option(prog_name=__project__, version=__version__)
-def cli(port, address, interval, **kwargs: Any):
-    """
-    Start the Kea exporter, expose Prometheus metrics over HTTP, and run
-    the main loop.
+def cli(port, address, interval, verbose, **kwargs: Any):
+    """Read Kea statistics and expose them as Prometheus metrics.
 
-    Instantiates the Exporter from provided keyword arguments, verifies
-    targets are configured, starts a Prometheus HTTP server bound to the
-    given address and port, installs a WSGI app that triggers exporter
-    updates at most once per `interval` seconds, prints the listening
-    address, and blocks indefinitely to keep the server running.
+    TARGETS are Kea HTTP URLs or Unix socket paths.
 
-    Parameters:
-        port (int): TCP port to bind the Prometheus HTTP server.
-        address (str): IP address or hostname to bind the Prometheus
-            HTTP server.
-        interval (int): Minimum number of seconds between consecutive
-            exporter updates.
-        **kwargs: Passed through to Exporter constructor (for example:
-            targets, client_cert, client_key, timeout, tls_no_verify,
-            ca_bundle).
+    The exporter completes one scrape cycle at startup. It then serves
+    Prometheus metrics over HTTP. Each request starts a scrape cycle unless
+    the configured interval has not elapsed.
     """
     exporter = Exporter(**kwargs)
 
     if not exporter.targets:
         sys.exit(1)
 
-    httpd, _ = start_http_server(port, address)
+    def collect():
+        report = exporter.update()
+        if verbose:
+            click.echo(report.summary(), err=True)
 
-    t = Timer()
+    click.echo(f"Starting {__project__} {__version__}", err=True)
+    collect()
+    try:
+        httpd, _ = start_http_server(port, address)
+    except OSError as ex:
+        raise click.ClickException(f"Cannot listen on http://{address}:{port}: {ex}") from ex
+
+    last_update = time.monotonic()
+    update_lock = threading.Lock()
 
     def local_wsgi_app(registry):
         func = make_wsgi_app(registry, False)
 
         def app(environ, start_response):
-            if t.time_elapsed() >= interval:
-                exporter.update()
-                t.reset()
-            output_array = func(environ, start_response)
-            return output_array
+            nonlocal last_update
+            with update_lock:
+                if time.monotonic() - last_update >= interval:
+                    collect()
+                    last_update = time.monotonic()
+                return list(func(environ, start_response))
 
         return app
 

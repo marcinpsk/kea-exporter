@@ -1,1338 +1,480 @@
+"""Exporter behaviour at the target seam.
+
+Which targets get built, what a scrape does with them, and what happens when
+one fails. Every test drives a real Exporter against real targets from
+tests.support, so nothing here asserts against a mock of the code under test.
 """
-Tests for kea_exporter.exporter module
-"""
 
-import unittest
-from unittest.mock import Mock, patch
+import pytest
+from prometheus_client import CollectorRegistry, generate_latest
 
-from prometheus_client import CollectorRegistry
-
-from kea_exporter import DHCPVersion
+from kea_exporter import DHCPVersion, catalogue
 from kea_exporter.exporter import Exporter
+from kea_exporter.http import KeaHTTPClient
+from kea_exporter.target import KeaCommandError, SourceFailure
+from kea_exporter.uds import KeaSocketClient
+from tests.support import FailingTarget, InMemoryTarget, ScriptedTarget, exporter_with, stat
 
+SERVER = "http://kea-dhcp4:53100"
+SUBNET_ID = 1
+SUBNET = "10.0.0.0/24"
+POOL = "10.0.0.100-10.0.0.200"
 
-class TestExporterInit(unittest.TestCase):
-    """Test Exporter initialization"""
+ASSIGNED = "subnet[1].pool[0].assigned-addresses"
 
-    def setUp(self):
-        self.registry = CollectorRegistry()
 
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("kea_exporter.exporter.KeaSocketClient")
-    def test_init_creates_metrics(self, mock_socket, mock_http):
-        """Test that initialization creates all metric structures"""
-        mock_http.return_value = Mock()
+def pool_subnets(subnet=SUBNET, pool=POOL):
+    return {SUBNET_ID: {"subnet": subnet, "pools": [{"pool": pool}]}}
 
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
 
-        # Check DHCP4 metrics setup
-        self.assertIsNotNone(exporter.metrics_dhcp4)
-        self.assertIsNotNone(exporter.metrics_dhcp4_map)
-        self.assertIsNotNone(exporter.metrics_dhcp4_global_ignore)
-        self.assertIsNotNone(exporter.metrics_dhcp4_subnet_ignore)
+@pytest.fixture
+def registry():
+    return CollectorRegistry()
 
-        # Check DHCP6 metrics setup
-        self.assertIsNotNone(exporter.metrics_dhcp6)
-        self.assertIsNotNone(exporter.metrics_dhcp6_map)
-        self.assertIsNotNone(exporter.metrics_dhcp6_global_ignore)
-        self.assertIsNotNone(exporter.metrics_dhcp6_subnet_ignore)
 
-        # Check DDNS metrics setup (new feature)
-        self.assertIsNotNone(exporter.metrics_ddns)
-        self.assertIsNotNone(exporter.metrics_ddns_map)
-        self.assertIsNotNone(exporter.ddns_key_pattern)
+@pytest.fixture
+def clock(monkeypatch):
+    """Control the monotonic clock the stale-label timeout reads."""
+    now = {"t": 0.0}
+    monkeypatch.setattr("kea_exporter.exporter.time.monotonic", lambda: now["t"])
+    return now
 
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_init_http_target(self, mock_http):
-        """Test initialization with HTTP target"""
-        mock_client = Mock()
-        mock_http.return_value = mock_client
 
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
+def exported(registry):
+    return generate_latest(registry).decode()
 
-        self.assertEqual(len(exporter.targets), 1)
-        self.assertEqual(exporter.targets[0], mock_client)
-        mock_http.assert_called_once()
 
-    @patch("kea_exporter.exporter.KeaSocketClient")
-    def test_init_socket_target(self, mock_socket):
-        """Test initialization with Unix socket target"""
-        mock_client = Mock()
-        mock_socket.return_value = mock_client
+# ------------------------------------------------------------------ building targets
 
-        exporter = Exporter(targets=["/var/run/kea/control.sock"], registry=self.registry)
 
-        self.assertEqual(len(exporter.targets), 1)
-        self.assertEqual(exporter.targets[0], mock_client)
-        mock_socket.assert_called_once()
+def test_builds_a_gauge_for_every_catalogued_metric(registry):
+    """Every metric the catalogue declares is registered, for every daemon.
 
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("kea_exporter.exporter.KeaSocketClient")
-    def test_init_multiple_targets(self, mock_socket, mock_http):
-        """Test initialization with multiple targets"""
-        mock_http_client = Mock()
-        mock_socket_client = Mock()
-        mock_http.return_value = mock_http_client
-        mock_socket.return_value = mock_socket_client
-
-        exporter = Exporter(
-            targets=["http://localhost:8000", "/var/run/kea/socket1", "http://remote:8001"], registry=self.registry
-        )
-
-        self.assertEqual(len(exporter.targets), 3)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_init_passes_timeout_to_http_client(self, mock_http):
-        """Test that timeout is passed to HTTP client"""
-        mock_http.return_value = Mock()
-
-        Exporter(targets=["http://localhost:8000"], timeout=30, registry=self.registry)
-
-        mock_http.assert_called_once()
-        call_kwargs = mock_http.call_args[1]
-        self.assertEqual(call_kwargs["timeout"], 30)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_init_handles_invalid_target(self, mock_echo, mock_http):
-        """Test handling of invalid target format"""
-        mock_http.side_effect = OSError("Connection failed")
-
-        exporter = Exporter(targets=["http://invalid:8000"], registry=self.registry)
-
-        # Should have echoed error but not crashed
-        mock_echo.assert_called()
-        # Failed targets are kept as placeholder dicts for retry
-        self.assertEqual(len(exporter.targets), 1)
-        self.assertIsInstance(exporter.targets[0], dict)
-        self.assertIsNone(exporter.targets[0]["client"])
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_init_strips_credentials_from_error(self, mock_echo, mock_http):
-        """Test that credentials are not leaked in error messages"""
-        mock_http.side_effect = ConnectionError("refused")
-
-        exporter = Exporter(targets=["http://admin:s3cret@kea.local:8000/api"], registry=self.registry)
-
-        # Failed targets are kept as placeholder dicts for retry
-        self.assertEqual(len(exporter.targets), 1)
-        self.assertIsInstance(exporter.targets[0], dict)
-        error_msg = mock_echo.call_args[0][0]
-        self.assertNotIn("admin", error_msg)
-        self.assertNotIn("s3cret", error_msg)
-        self.assertIn("kea.local:8000", error_msg)
-
-
-class TestExporterSetupDDNSMetrics(unittest.TestCase):
-    """Test DDNS metrics setup (new feature)"""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_setup_ddns_metrics_creates_global_metrics(self, mock_http):
-        """Test that DDNS global metrics are created"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check global DDNS metrics exist
-        self.assertIn("ncr_error", exporter.metrics_ddns)
-        self.assertIn("ncr_invalid", exporter.metrics_ddns)
-        self.assertIn("ncr_received", exporter.metrics_ddns)
-        self.assertIn("queue_full", exporter.metrics_ddns)
-        self.assertIn("update_error", exporter.metrics_ddns)
-        self.assertIn("update_sent", exporter.metrics_ddns)
-        self.assertIn("update_signed", exporter.metrics_ddns)
-        self.assertIn("update_success", exporter.metrics_ddns)
-        self.assertIn("update_timeout", exporter.metrics_ddns)
-        self.assertIn("update_unsigned", exporter.metrics_ddns)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_setup_ddns_metrics_creates_per_key_metrics(self, mock_http):
-        """Test that DDNS per-key metrics are created"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check per-key DDNS metrics exist
-        self.assertIn("key_update_error", exporter.metrics_ddns)
-        self.assertIn("key_update_sent", exporter.metrics_ddns)
-        self.assertIn("key_update_success", exporter.metrics_ddns)
-        self.assertIn("key_update_timeout", exporter.metrics_ddns)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_setup_ddns_metrics_has_server_label(self, mock_http):
-        """Test that DDNS metrics include server label"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check that metrics have server label
-        ncr_error_metric = exporter.metrics_ddns["ncr_error"]
-        self.assertIn("server", ncr_error_metric._labelnames)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_setup_ddns_metrics_per_key_has_key_label(self, mock_http):
-        """Test that per-key DDNS metrics include key label"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check that per-key metrics have both server and key labels
-        key_metric = exporter.metrics_ddns["key_update_sent"]
-        self.assertIn("server", key_metric._labelnames)
-        self.assertIn("key", key_metric._labelnames)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_setup_ddns_metrics_map(self, mock_http):
-        """Test DDNS metrics mapping"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check metric mappings exist
-        expected_mappings = {
-            "ncr-error": "ncr_error",
-            "ncr-invalid": "ncr_invalid",
-            "ncr-received": "ncr_received",
-            "queue-mgr-queue-full": "queue_full",
-            "update-error": "update_error",
-            "update-sent": "update_sent",
-            "update-signed": "update_signed",
-            "update-success": "update_success",
-            "update-timeout": "update_timeout",
-            "update-unsigned": "update_unsigned",
-        }
-
-        for kea_name, metric_name in expected_mappings.items():
-            self.assertIn(kea_name, exporter.metrics_ddns_map)
-            self.assertEqual(exporter.metrics_ddns_map[kea_name]["metric"], metric_name)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_setup_ddns_key_pattern(self, mock_http):
-        """Test DDNS per-key pattern regex"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Test pattern matches expected formats
-        pattern = exporter.ddns_key_pattern
-
-        # Should match: key[domain.name.].metric-name
-        match = pattern.match("key[example.com.].update-sent")
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group("key"), "example.com.")
-        self.assertEqual(match.group("metric"), "update-sent")
-
-        # Should match with complex domain
-        match = pattern.match("key[sub.domain.example.org.].update-success")
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group("key"), "sub.domain.example.org.")
-
-        # Should not match without brackets
-        match = pattern.match("update-sent")
-        self.assertIsNone(match)
-
-
-class TestExporterServerLabeling(unittest.TestCase):
-    """Test server labeling feature (new in this branch)"""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_dhcp4_metrics_have_server_label(self, mock_http):
-        """Test that DHCP4 metrics include server label"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check sent_packets metric has server label
-        sent_packets = exporter.metrics_dhcp4["sent_packets"]
-        self.assertIn("server", sent_packets._labelnames)
-        self.assertIn("operation", sent_packets._labelnames)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_dhcp6_metrics_have_server_label(self, mock_http):
-        """Test that DHCP6 metrics include server label"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check sent_packets metric has server label
-        sent_packets = exporter.metrics_dhcp6["sent_packets"]
-        self.assertIn("server", sent_packets._labelnames)
-        self.assertIn("operation", sent_packets._labelnames)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_dhcp4_subnet_metrics_have_server_label(self, mock_http):
-        """Test that DHCP4 subnet metrics include server label"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check subnet metrics have server label
-        addresses_assigned = exporter.metrics_dhcp4["addresses_assigned_total"]
-        self.assertIn("server", addresses_assigned._labelnames)
-        self.assertIn("subnet", addresses_assigned._labelnames)
-        self.assertIn("subnet_id", addresses_assigned._labelnames)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_dhcp6_subnet_metrics_have_server_label(self, mock_http):
-        """Test that DHCP6 subnet metrics include server label"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Check subnet metrics have server label
-        na_assigned = exporter.metrics_dhcp6["na_assigned_total"]
-        self.assertIn("server", na_assigned._labelnames)
-        self.assertIn("subnet", na_assigned._labelnames)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_dhcp6_reuse_gauges_no_pool_label(self, mock_http):
-        """na_reuses_total and pd_reuses_total have no pool label (subnet-level only in Kea)"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        for key in ("na_reuses_total", "pd_reuses_total"):
-            gauge = exporter.metrics_dhcp6[key]
-            self.assertIn("server", gauge._labelnames, key)
-            self.assertIn("subnet", gauge._labelnames, key)
-            self.assertIn("subnet_id", gauge._labelnames, key)
-            self.assertNotIn("pool", gauge._labelnames, key)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_dhcp6_addr_reg_gauge_registered(self, mock_http):
-        """na_registered_total gauge exists with correct labels (Kea 2.5.5+)"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        na_registered = exporter.metrics_dhcp6["na_registered_total"]
-        self.assertIn("server", na_registered._labelnames)
-        self.assertIn("subnet", na_registered._labelnames)
-        self.assertIn("subnet_id", na_registered._labelnames)
-        self.assertNotIn("pool", na_registered._labelnames)
-
-
-class TestExporterParseMetrics(unittest.TestCase):
-    """Test parse_metrics method"""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_dhcp4(self, mock_http):
-        """Test parsing DHCP4 metrics"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        arguments = {
-            "pkt4-discover-received": [[100, "2024-01-01 00:00:00"]],
-            "pkt4-ack-sent": [[50, "2024-01-01 00:00:00"]],
-        }
-        subnets = {}
-
-        # Mock metrics to capture calls
-        mock_received = Mock()
-        mock_received._labelnames = ["server", "operation"]
-        mock_received_labels = Mock(return_value=mock_received)
-        mock_received.labels = mock_received_labels
-        exporter.metrics_dhcp4["received_packets"] = mock_received
-
-        mock_sent = Mock()
-        mock_sent._labelnames = ["server", "operation"]
-        mock_sent_labels = Mock(return_value=mock_sent)
-        mock_sent.labels = mock_sent_labels
-        exporter.metrics_dhcp4["sent_packets"] = mock_sent
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-
-        # Verify received_packets was called with correct labels and value
-        mock_received_labels.assert_called_once_with(server=server_id, operation="discover")
-        mock_received.set.assert_called_once_with(100)
-
-        # Verify sent_packets was called with correct labels and value
-        mock_sent_labels.assert_called_once_with(server=server_id, operation="ack")
-        mock_sent.set.assert_called_once_with(50)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_dhcp6(self, mock_http):
-        """Test parsing DHCP6 metrics"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        arguments = {
-            "pkt6-solicit-received": [[200, "2024-01-01 00:00:00"]],
-            "pkt6-reply-sent": [[150, "2024-01-01 00:00:00"]],
-        }
-        subnets = {}
-
-        # Mock metrics to capture calls
-        mock_received = Mock()
-        mock_received._labelnames = ["server", "operation"]
-        mock_received_labels = Mock(return_value=mock_received)
-        mock_received.labels = mock_received_labels
-        exporter.metrics_dhcp6["received_packets"] = mock_received
-
-        mock_sent = Mock()
-        mock_sent._labelnames = ["server", "operation"]
-        mock_sent_labels = Mock(return_value=mock_sent)
-        mock_sent.labels = mock_sent_labels
-        exporter.metrics_dhcp6["sent_packets"] = mock_sent
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
-
-        # Verify received_packets was called with correct labels and value
-        mock_received_labels.assert_called_once_with(server=server_id, operation="solicit")
-        mock_received.set.assert_called_once_with(200)
-
-        # Verify sent_packets was called with correct labels and value
-        mock_sent_labels.assert_called_once_with(server=server_id, operation="reply")
-        mock_sent.set.assert_called_once_with(150)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_dhcp6_addr_reg_packets(self, mock_http):
-        """Test parsing DHCPv6 address registration packet metrics (Kea 2.5.5+)"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        arguments = {
-            "pkt6-addr-reg-inform-received": [[10, "2024-01-01 00:00:00"]],
-            "pkt6-addr-reg-reply-received": [[8, "2024-01-01 00:00:00"]],
-            "pkt6-addr-reg-reply-sent": [[9, "2024-01-01 00:00:00"]],
-        }
-        subnets = {}
-
-        mock_received = Mock()
-        mock_received._labelnames = ["server", "operation"]
-        mock_received.labels = Mock(return_value=mock_received)
-        exporter.metrics_dhcp6["received_packets"] = mock_received
-
-        mock_sent = Mock()
-        mock_sent._labelnames = ["server", "operation"]
-        mock_sent.labels = Mock(return_value=mock_sent)
-        exporter.metrics_dhcp6["sent_packets"] = mock_sent
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
-
-        mock_received.labels.assert_any_call(server=server_id, operation="addr-reg-inform")
-        mock_received.labels.assert_any_call(server=server_id, operation="addr-reg-reply")
-        mock_sent.labels.assert_called_once_with(server=server_id, operation="addr-reg-reply")
-        self.assertEqual(mock_received.set.call_count, 2)
-        mock_received.set.assert_any_call(10)
-        mock_received.set.assert_any_call(8)
-        mock_sent.set.assert_called_once_with(9)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_dhcp6_registered_nas_subnet(self, mock_http):
-        """Test parsing DHCPv6 registered-nas at subnet level (Kea 2.5.5+).
-
-        registered-nas is a subnet-level stat only — Kea never emits a
-        pool-level equivalent (confirmed in cfg_subnets6.cc updateStatistics).
-        """
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        subnet_id = 5
-        subnets = {subnet_id: {"subnet": "2001:db8::/48", "pools": [{"pool": "2001:db8::1-2001:db8::ff"}]}}
-        # Kea emits subnet[N].registered-nas — no pool segment
-        arguments = {f"subnet[{subnet_id}].registered-nas": [[7, "2024-01-01 00:00:00"]]}
-
-        mock_gauge = Mock()
-        mock_gauge._labelnames = ["server", "subnet", "subnet_id"]
-        mock_gauge.labels = Mock(return_value=mock_gauge)
-        exporter.metrics_dhcp6["na_registered_total"] = mock_gauge
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
-
-        mock_gauge.labels.assert_called_once_with(
-            server=server_id,
-            subnet="2001:db8::/48",
-            subnet_id=subnet_id,
-        )
-        mock_gauge.set.assert_called_once_with(7)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_dhcp6_cumulative_registered_nas_ignored(self, mock_http):
-        """cumulative-registered-nas at global and subnet level should be silently ignored"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        subnet_id = 5
-        subnets = {subnet_id: {"subnet": "2001:db8::/48", "pools": []}}
-        arguments = {
-            "cumulative-registered-nas": [[100, "2024-01-01 00:00:00"]],
-            f"subnet[{subnet_id}].cumulative-registered-nas": [[50, "2024-01-01 00:00:00"]],
-        }
-
-        # Should not add anything to unhandled_metrics — check both global and subnet forms
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
-        self.assertNotIn("cumulative-registered-nas", exporter.unhandled_metrics)
-        self.assertNotIn(f"subnet[{subnet_id}].cumulative-registered-nas", exporter.unhandled_metrics)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_dhcp6_lease_reuses_subnet(self, mock_http):
-        """v6-ia-na/pd-lease-reuses are subnet-level only — no pool label emitted."""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        subnet_id = 7
-        subnets = {subnet_id: {"subnet": "2001:db8::/48", "pools": [{"pool": "2001:db8::1-2001:db8::ff"}]}}
-        arguments = {
-            f"subnet[{subnet_id}].v6-ia-na-lease-reuses": [[3, "2024-01-01 00:00:00"]],
-            f"subnet[{subnet_id}].v6-ia-pd-lease-reuses": [[5, "2024-01-01 00:00:00"]],
-        }
-
-        mock_na = Mock()
-        mock_na._labelnames = ["server", "subnet", "subnet_id"]
-        mock_na.labels = Mock(return_value=mock_na)
-        mock_pd = Mock()
-        mock_pd._labelnames = ["server", "subnet", "subnet_id"]
-        mock_pd.labels = Mock(return_value=mock_pd)
-        exporter.metrics_dhcp6["na_reuses_total"] = mock_na
-        exporter.metrics_dhcp6["pd_reuses_total"] = mock_pd
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP6, arguments, subnets)
-
-        mock_na.labels.assert_called_once_with(server=server_id, subnet="2001:db8::/48", subnet_id=subnet_id)
-        mock_na.set.assert_called_once_with(3)
-        mock_pd.labels.assert_called_once_with(server=server_id, subnet="2001:db8::/48", subnet_id=subnet_id)
-        mock_pd.set.assert_called_once_with(5)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_ddns(self, mock_http):
-        """Test parsing DDNS metrics"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        arguments = {
-            "ncr-received": [[150, "2024-01-01 00:00:00"]],
-            "update-sent": [[100, "2024-01-01 00:00:00"]],
-            "update-success": [[95, "2024-01-01 00:00:00"]],
-        }
-        subnets = {}
-
-        # Mock metrics to capture calls
-        mock_ncr_received = Mock()
-        mock_ncr_received._labelnames = ["server"]
-        mock_ncr_labels = Mock(return_value=mock_ncr_received)
-        mock_ncr_received.labels = mock_ncr_labels
-        exporter.metrics_ddns["ncr_received"] = mock_ncr_received
-
-        mock_update_sent = Mock()
-        mock_update_sent._labelnames = ["server"]
-        mock_sent_labels = Mock(return_value=mock_update_sent)
-        mock_update_sent.labels = mock_sent_labels
-        exporter.metrics_ddns["update_sent"] = mock_update_sent
-
-        mock_update_success = Mock()
-        mock_update_success._labelnames = ["server"]
-        mock_success_labels = Mock(return_value=mock_update_success)
-        mock_update_success.labels = mock_success_labels
-        exporter.metrics_ddns["update_success"] = mock_update_success
-
-        exporter.parse_metrics(server_id, DHCPVersion.DDNS, arguments, subnets)
-
-        # Verify metrics were called with correct server labels and values
-        mock_ncr_labels.assert_called_once_with(server=server_id)
-        mock_ncr_received.set.assert_called_once_with(150)
-
-        mock_sent_labels.assert_called_once_with(server=server_id)
-        mock_update_sent.set.assert_called_once_with(100)
-
-        mock_success_labels.assert_called_once_with(server=server_id)
-        mock_update_success.set.assert_called_once_with(95)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_ddns_per_key(self, mock_http):
-        """Test parsing DDNS per-key metrics"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        arguments = {
-            "key[example.com.].update-sent": [[50, "2024-01-01 00:00:00"]],
-            "key[example.com.].update-success": [[45, "2024-01-01 00:00:00"]],
-            "key[example.com.].update-error": [[5, "2024-01-01 00:00:00"]],
-            "key[test.org.].update-sent": [[30, "2024-01-01 00:00:00"]],
-        }
-        subnets = {}
-
-        # Mock per-key metrics to capture calls
-        mock_key_sent = Mock()
-        mock_key_sent._labelnames = ["server", "key"]
-        mock_sent_labels = Mock(return_value=mock_key_sent)
-        mock_key_sent.labels = mock_sent_labels
-        exporter.metrics_ddns["key_update_sent"] = mock_key_sent
-
-        mock_key_success = Mock()
-        mock_key_success._labelnames = ["server", "key"]
-        mock_success_labels = Mock(return_value=mock_key_success)
-        mock_key_success.labels = mock_success_labels
-        exporter.metrics_ddns["key_update_success"] = mock_key_success
-
-        mock_key_error = Mock()
-        mock_key_error._labelnames = ["server", "key"]
-        mock_error_labels = Mock(return_value=mock_key_error)
-        mock_key_error.labels = mock_error_labels
-        exporter.metrics_ddns["key_update_error"] = mock_key_error
-
-        exporter.parse_metrics(server_id, DHCPVersion.DDNS, arguments, subnets)
-
-        # Verify per-key metrics were called with correct labels and values
-        # For example.com. key
-        self.assertEqual(mock_sent_labels.call_count, 2)
-        mock_sent_labels.assert_any_call(server=server_id, key="example.com.")
-        mock_sent_labels.assert_any_call(server=server_id, key="test.org.")
-        self.assertEqual(mock_key_sent.set.call_count, 2)
-
-        mock_success_labels.assert_called_once_with(server=server_id, key="example.com.")
-        mock_key_success.set.assert_called_once_with(45)
-
-        mock_error_labels.assert_called_once_with(server=server_id, key="example.com.")
-        mock_key_error.set.assert_called_once_with(5)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_parse_metrics_unhandled_ddns_per_key_metric(self, mock_echo, mock_http):
-        """Test handling of unknown DDNS per-key metric"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        arguments = {"key[example.com.].unknown-metric": [[10, "2024-01-01 00:00:00"]]}
-        subnets = {}
-
-        exporter.parse_metrics(server_id, DHCPVersion.DDNS, arguments, subnets)
-
-        # Should have echoed a message about unhandled metric
-        mock_echo.assert_called()
-        call_args = mock_echo.call_args[0][0]
-        self.assertIn("Unhandled DDNS per-key metric", call_args)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_parse_metrics_unhandled_metric_only_once(self, mock_echo, mock_http):
-        """Test that unhandled metrics are only reported once"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        arguments = {
-            "unknown-metric-1": [[10, "2024-01-01 00:00:00"]],
-            "unknown-metric-2": [[20, "2024-01-01 00:00:00"]],
-        }
-        subnets = {}
-
-        # Parse twice
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-        # First call should have reported both unknown metrics
-        self.assertGreater(mock_echo.call_count, 0)
-        mock_echo.reset_mock()
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-
-        # Should not echo again for the same metrics
-        self.assertEqual(mock_echo.call_count, 0)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_server_label_included(self, mock_http):
-        """Test that server label is included in metrics"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://server1:8000"
-        arguments = {"pkt4-ack-sent": [[100, "2024-01-01 00:00:00"]]}
-        subnets = {}
-
-        # Mock the metric to capture labels
-        mock_metric = Mock()
-        mock_metric._labelnames = ["server", "operation"]
-        mock_labels = Mock(return_value=mock_metric)
-        mock_metric.labels = mock_labels
-        exporter.metrics_dhcp4["sent_packets"] = mock_metric
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-
-        # Verify server label was passed
-        mock_labels.assert_called()
-        call_kwargs = mock_labels.call_args[1]
-        self.assertEqual(call_kwargs["server"], "http://server1:8000")
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_ignores_global_ignore_list(self, mock_http):
-        """Test that global ignore list is respected"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Get an ignored metric from the ignore list
-        ignored_metric = exporter.metrics_dhcp4_global_ignore[0]
-
-        server_id = "http://localhost:8000"
-        arguments = {ignored_metric: [[100, "2024-01-01 00:00:00"]]}
-        subnets = {}
-
-        # Should not raise an error about unhandled metric
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_unknown_dhcp_version_returns_early(self, mock_http):
-        """Test that an unknown dhcp_version causes early return"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        # Should not raise - just return
-        exporter.parse_metrics("server", "UNKNOWN", {"key": [[1, "ts"]]}, {})
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_subnet_metric(self, mock_http):
-        """Test parsing a subnet-level metric with subnet context"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        subnets = {1: {"subnet": "192.168.1.0/24", "pools": []}}
-        arguments = {"subnet[1].assigned-addresses": [[42, "2024-01-01 00:00:00"]]}
-
-        mock_metric = Mock()
-        mock_metric._labelnames = ["server", "subnet", "subnet_id", "pool"]
-        mock_metric.labels.return_value = mock_metric
-        exporter.metrics_dhcp4["addresses_assigned_total"] = mock_metric
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-
-        mock_metric.labels.assert_called_once_with(server=server_id, subnet="192.168.1.0/24", subnet_id=1, pool="")
-        mock_metric.set.assert_called_once_with(42)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_pool_metric(self, mock_http):
-        """Test parsing a pool-level metric with pool context"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        subnets = {1: {"subnet": "192.168.1.0/24", "pools": [{"pool": "192.168.1.10-192.168.1.50"}]}}
-        arguments = {"subnet[1].pool[0].assigned-addresses": [[10, "2024-01-01 00:00:00"]]}
-
-        mock_metric = Mock()
-        mock_metric._labelnames = ["server", "subnet", "subnet_id", "pool"]
-        mock_metric.labels.return_value = mock_metric
-        exporter.metrics_dhcp4["addresses_assigned_total"] = mock_metric
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-
-        mock_metric.labels.assert_called_once_with(
-            server=server_id, subnet="192.168.1.0/24", subnet_id=1, pool="192.168.1.10-192.168.1.50"
-        )
-        mock_metric.set.assert_called_once_with(10)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_parse_metrics_missing_subnet(self, mock_echo, mock_http):
-        """Test that a metric for a vanished subnet is skipped and logged once"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        subnets = {}  # subnet 99 not present
-        arguments = {"subnet[99].assigned-addresses": [[1, "2024-01-01 00:00:00"]]}
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-        mock_echo.assert_called_once()
-        self.assertIn("subnet vanished", mock_echo.call_args[0][0])
-
-        # Second call should not log again
-        mock_echo.reset_mock()
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-        mock_echo.assert_not_called()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_parse_metrics_missing_pool(self, mock_echo, mock_http):
-        """Test that a metric for a vanished pool is skipped and logged once"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        subnets = {1: {"subnet": "192.168.1.0/24", "pools": []}}  # no pools
-        arguments = {"subnet[1].pool[0].assigned-addresses": [[1, "2024-01-01 00:00:00"]]}
-
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-        mock_echo.assert_called_once()
-        self.assertIn("subnet vanished", mock_echo.call_args[0][0])
-
-        # Second call should not log again
-        mock_echo.reset_mock()
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-        mock_echo.assert_not_called()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_parse_metrics_subnet_ignore_list(self, mock_http):
-        """Test that subnet-level ignore list is respected"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        server_id = "http://localhost:8000"
-        ignored = exporter.metrics_dhcp4_subnet_ignore[0]
-        subnets = {1: {"subnet": "192.168.1.0/24", "pools": []}}
-        arguments = {f"subnet[1].{ignored}": [[1, "2024-01-01 00:00:00"]]}
-
-        # Should not raise or try to export
-        exporter.parse_metrics(server_id, DHCPVersion.DHCP4, arguments, subnets)
-
-
-class TestExporterUpdate(unittest.TestCase):
-    """Test Exporter.update method"""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_update_calls_stats_on_all_targets(self, mock_http):
-        """Test that update calls stats on all targets"""
-        mock_client1 = Mock()
-        mock_client1.stats.return_value = [("http://server1:8000", DHCPVersion.DHCP4, {}, {})]
-
-        mock_client2 = Mock()
-        mock_client2.stats.return_value = [("http://server2:8000", DHCPVersion.DHCP6, {}, {})]
-
-        mock_http.side_effect = [mock_client1, mock_client2]
-
-        exporter = Exporter(targets=["http://server1:8000", "http://server2:8000"], registry=self.registry)
-        exporter.update()
-
-        # Both clients should have had stats() called
-        mock_client1.stats.assert_called_once()
-        mock_client2.stats.assert_called_once()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_update_calls_parse_metrics(self, mock_http):
-        """Test that update calls parse_metrics for each stats result"""
-        mock_client = Mock()
-        mock_client.stats.return_value = [
-            ("http://server:8000", DHCPVersion.DHCP4, {"pkt4-received": [[100, "2024-01-01"]]}, {})
-        ]
-
-        mock_http.return_value = mock_client
-
-        exporter = Exporter(targets=["http://server:8000"], registry=self.registry)
-
-        with patch.object(exporter, "parse_metrics") as mock_parse:
-            exporter.update()
-
-            mock_parse.assert_called_once()
-            call_args = mock_parse.call_args[0]
-            self.assertEqual(call_args[0], "http://server:8000")  # server_id
-            self.assertEqual(call_args[1], DHCPVersion.DHCP4)  # dhcp_version
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_update_continues_on_target_failure(self, mock_echo, mock_http):
-        """Test that a failing target does not prevent other targets from being collected"""
-        mock_client1 = Mock()
-        mock_client1.stats.side_effect = ConnectionError("server1 down")
-        mock_client1._server_id = "http://server1:8000"
-
-        mock_client2 = Mock()
-        mock_client2.stats.return_value = [("http://server2:8000", DHCPVersion.DHCP4, {}, {})]
-
-        mock_http.side_effect = [mock_client1, mock_client2]
-
-        exporter = Exporter(targets=["http://server1:8000", "http://server2:8000"], registry=self.registry)
-        exporter.update()
-
-        # First target failed but second should still have been called
-        mock_client1.stats.assert_called_once()
-        mock_client2.stats.assert_called_once()
-        # Error should have been logged
-        mock_echo.assert_called()
-        error_msg = mock_echo.call_args[0][0]
-        self.assertIn("server1", error_msg)
-
-
-class TestExporterSubnetPattern(unittest.TestCase):
-    """Test subnet pattern regex"""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_subnet_pattern_pool_metric(self, mock_http):
-        """Test subnet pattern matches pool metrics"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        pattern = exporter.subnet_pattern
-        match = pattern.match("subnet[1].pool[0].assigned-addresses")
-
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group("subnet_id"), "1")
-        self.assertEqual(match.group("pool_index"), "0")
-        self.assertEqual(match.group("pool_metric"), "assigned-addresses")
-        self.assertIsNone(match.group("subnet_metric"))
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_subnet_pattern_subnet_metric(self, mock_http):
-        """Test subnet pattern matches subnet-level metrics"""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-
-        pattern = exporter.subnet_pattern
-        match = pattern.match("subnet[5].total-addresses")
-
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group("subnet_id"), "5")
-        self.assertIsNone(match.group("pool_index"))
-        self.assertIsNone(match.group("pool_metric"))
-        self.assertEqual(match.group("subnet_metric"), "total-addresses")
-
-
-class TestStalePoolCleanup(unittest.TestCase):
-    """Stale label removal after pool rename or deletion."""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_renamed_pool_label_removed_on_next_scrape(self, mock_http):
-        """Old pool label combo is pruned after the pool range is renamed in Kea."""
-        from prometheus_client import generate_latest
-
-        server = "http://kea-dhcp4:53100"
-        subnet_id = 2
-        subnet = "172.30.150.0/24"
-        old_pool = "172.30.150.209-172.30.150.250"
-        new_pool = "172.30.150.209-172.30.150.210"
-
-        subnets_old = {subnet_id: {"subnet": subnet, "pools": [{"pool": old_pool}]}}
-        args_old = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[5, "2024-01-01"]]}
-
-        subnets_new = {subnet_id: {"subnet": subnet, "pools": [{"pool": new_pool}]}}
-        args_new = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[3, "2024-01-01"]]}
-
-        mock_client = Mock()
-        mock_client.stats.side_effect = [
-            iter([(server, DHCPVersion.DHCP4, args_old, subnets_old)]),
-            iter([(server, DHCPVersion.DHCP4, args_new, subnets_new)]),
-        ]
-        mock_http.return_value = mock_client
-
-        exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
-
-        exporter.update()
-        output = generate_latest(self.registry).decode()
-        self.assertIn(old_pool, output)
-
-        exporter.update()
-        output = generate_latest(self.registry).decode()
-        self.assertNotIn(old_pool, output)
-        self.assertIn(new_pool, output)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_stale_label_not_pruned_when_server_scrape_fails(self, mock_http):
-        """Labels from a server that failed to scrape are not pruned."""
-        from prometheus_client import generate_latest
-
-        server = "http://kea-dhcp4:53100"
-        subnet_id = 1
-        subnet = "10.0.0.0/24"
-        pool = "10.0.0.100-10.0.0.200"
-
-        subnets = {subnet_id: {"subnet": subnet, "pools": [{"pool": pool}]}}
-        args = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[7, "2024-01-01"]]}
-
-        mock_client = Mock()
-        mock_client._server_id = server
-        mock_client.stats.side_effect = [
-            iter([(server, DHCPVersion.DHCP4, args, subnets)]),
-            ConnectionError("target down"),
-        ]
-        mock_http.return_value = mock_client
-
-        exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
-
-        exporter.update()
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool, output)
-
-        # Scrape fails — labels should be preserved, not pruned
-        exporter.update()
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool, output)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_stale_label_pruned_after_timeout(self, mock_http):
-        """Labels are pruned when stale_timeout expires after a scrape failure.
-
-        Covers the full sequence: success → fail before timeout → fail after timeout.
-        """
-        from prometheus_client import generate_latest
-
-        server = "http://kea-dhcp4:53100"
-        subnet_id = 1
-        subnet = "10.0.0.0/24"
-        pool = "10.0.0.100-10.0.0.200"
-
-        subnets = {subnet_id: {"subnet": subnet, "pools": [{"pool": pool}]}}
-        args = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[7, "2024-01-01"]]}
-
-        mock_client = Mock()
-        mock_client._server_id = server
-        mock_client.stats.side_effect = [
-            iter([(server, DHCPVersion.DHCP4, args, subnets)]),
-            ConnectionError("target down"),
-            ConnectionError("target down"),
-        ]
-        mock_http.return_value = mock_client
-
-        exporter = Exporter(targets=["http://kea-dhcp4:53100"], stale_timeout=60, registry=self.registry)
-
-        with patch("kea_exporter.exporter.time.monotonic", return_value=0.0):
-            exporter.update()
-
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool, output)
-
-        # Scrape fails before timeout — label must still be present
-        with patch("kea_exporter.exporter.time.monotonic", return_value=30.0):
-            exporter.update()
-
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool, output)
-
-        # Advance time past stale_timeout, then scrape fails — label must be pruned
-        with patch("kea_exporter.exporter.time.monotonic", return_value=61.0):
-            exporter.update()
-
-        output = generate_latest(self.registry).decode()
-        self.assertNotIn(pool, output)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_stale_label_not_pruned_when_timeout_disabled(self, mock_http):
-        """Labels persist after repeated scrape failures when stale_timeout=0."""
-        from prometheus_client import generate_latest
-
-        server = "http://kea-dhcp4:53100"
-        subnet_id = 1
-        subnet = "10.0.0.0/24"
-        pool = "10.0.0.100-10.0.0.200"
-
-        subnets = {subnet_id: {"subnet": subnet, "pools": [{"pool": pool}]}}
-        args = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[7, "2024-01-01"]]}
-
-        mock_client = Mock()
-        mock_client._server_id = server
-        mock_client.stats.side_effect = [
-            iter([(server, DHCPVersion.DHCP4, args, subnets)]),
-            ConnectionError("target down"),
-            ConnectionError("target down"),
-        ]
-        mock_http.return_value = mock_client
-
-        exporter = Exporter(targets=["http://kea-dhcp4:53100"], stale_timeout=0, registry=self.registry)
-
-        with patch("kea_exporter.exporter.time.monotonic", return_value=0.0):
-            exporter.update()
-
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool, output)
-
-        with patch("kea_exporter.exporter.time.monotonic", return_value=9999.0):
-            exporter.update()
-            exporter.update()
-
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool, output)
-
-    def test_stale_timeout_zero_is_default(self):
-        """Exporter.stale_timeout defaults to 0 when not specified."""
-        with patch("kea_exporter.exporter.KeaHTTPClient"):
-            exporter = Exporter(targets=["http://kea-dhcp4:53100"], registry=self.registry)
-        self.assertEqual(exporter.stale_timeout, 0)
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_dhcp6_labels_not_pruned_when_only_dhcp4_succeeds(self, mock_http):
-        """dhcp6 labels are preserved when dhcp4 scrape succeeds but dhcp6 is absent."""
-        from prometheus_client import generate_latest
-
-        server = "http://kea:53100"
-        subnet_id = 1
-        subnet4 = "10.0.0.0/24"
-        subnet6 = "2001:db8::/64"
-        pool4 = "10.0.0.10-10.0.0.20"
-        pool6 = "2001:db8::10-2001:db8::20"
-
-        subnets4 = {subnet_id: {"subnet": subnet4, "pools": [{"pool": pool4}]}}
-        subnets6 = {subnet_id: {"subnet": subnet6, "pools": [{"pool": pool6}]}}
-        args4 = {f"subnet[{subnet_id}].pool[0].assigned-addresses": [[5, "2024-01-01"]]}
-        args6 = {f"subnet[{subnet_id}].pool[0].assigned-nas": [[3, "2024-01-01"]]}
-
-        mock_client = Mock()
-        mock_client._server_id = server
-        # First scrape: both dhcp4 and dhcp6 succeed
-        # Second scrape: only dhcp4 succeeds (dhcp6 absent — simulates result!=0)
-        mock_client.stats.side_effect = [
-            iter(
-                [
-                    (server, DHCPVersion.DHCP4, args4, subnets4),
-                    (server, DHCPVersion.DHCP6, args6, subnets6),
-                ]
-            ),
-            iter(
-                [
-                    (server, DHCPVersion.DHCP4, args4, subnets4),
-                    # dhcp6 absent
-                ]
-            ),
-        ]
-        mock_http.return_value = mock_client
-
-        exporter = Exporter(targets=["http://kea:53100"], registry=self.registry)
-
-        # First update: both modules scraped, both labels present
-        exporter.update()
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool4, output)
-        self.assertIn(pool6, output)
-
-        # Second update: dhcp4 succeeds, dhcp6 absent — dhcp6 label MUST NOT be pruned
-        exporter.update()
-        output = generate_latest(self.registry).decode()
-        self.assertIn(pool4, output)
-        self.assertIn(pool6, output, "dhcp6 pool label was incorrectly pruned when only dhcp4 succeeded")
-
-
-class TestRetryLimit(unittest.TestCase):
-    """Test retry limit for failed target initialisation."""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_give_up_after_max_retries(self, mock_echo, mock_http):
-        """Target is skipped and a give-up message logged after MAX_TARGET_RETRIES failures."""
-        from kea_exporter.exporter import MAX_TARGET_RETRIES
-
-        mock_http.side_effect = OSError("Connection refused")
-        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
-
-        # Target should be a placeholder dict
-        self.assertIsInstance(exporter.targets[0], dict)
-
-        mock_echo.reset_mock()
-
-        # Exhaust all retries
-        for _ in range(MAX_TARGET_RETRIES):
-            exporter.update()
-
-        # Give-up message must have been logged (on the final retry)
-        logged_msgs = [call[0][0] for call in mock_echo.call_args_list]
-        self.assertTrue(
-            any("giving up" in msg.lower() for msg in logged_msgs),
-            f"Expected give-up message; got: {logged_msgs}",
-        )
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_no_init_attempt_after_max_retries(self, mock_echo, mock_http):
-        """After MAX_TARGET_RETRIES the client constructor is no longer called."""
-        from kea_exporter.exporter import MAX_TARGET_RETRIES
-
-        mock_http.side_effect = OSError("Connection refused")
-        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
-
-        # Exhaust all retries
-        for _ in range(MAX_TARGET_RETRIES):
-            exporter.update()
-
-        # Reset to detect any further calls
-        mock_http.reset_mock()
-        mock_echo.reset_mock()
-
-        exporter.update()
-
-        # No further attempt to create the client
-        mock_http.assert_not_called()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_successful_recovery_replaces_placeholder(self, mock_echo, mock_http):
-        """After an initial failure, a successful re-init replaces the placeholder and stats() is called."""
-        mock_client = Mock()
-        mock_client.stats.return_value = iter([])
-        # First call (during __init__) raises; second call (during update) succeeds
-        mock_http.side_effect = [OSError("initial failure"), mock_client]
-
-        exporter = Exporter(targets=["http://kea:8000"], registry=self.registry)
-
-        # Target should be a placeholder dict after init failure
-        self.assertIsInstance(exporter.targets[0], dict)
-
-        # Next update() triggers _try_init_target which now succeeds
-        exporter.update()
-
-        # Placeholder should have been replaced with the real client
-        self.assertIs(exporter.targets[0], mock_client)
-
-        # stats() should have been called on the recovered client
-        mock_client.stats.assert_called_once()
-
-
-class TestGaugeRemoveExceptionHandling(unittest.TestCase):
-    """Test narrowed exception handling in gauge.remove() during stale-label pruning."""
-
-    def setUp(self):
-        self.registry = CollectorRegistry()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def test_keyerror_from_gauge_remove_is_silenced(self, mock_http):
-        """KeyError raised by gauge.remove() is silently ignored."""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-        exporter.targets = []  # No live targets; only stale-label pruning runs
-
-        mock_gauge = Mock()
-        mock_gauge._labelnames = []  # No "server" label → server_idx is None → remove is always called
-        mock_gauge.remove.side_effect = KeyError("label not found")
-
-        exporter._seen_labels_previous = {id(mock_gauge): (mock_gauge, {()})}
-
-        # Must not raise
-        exporter.update()
-        mock_gauge.remove.assert_called_once_with()
-
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    @patch("click.echo")
-    def test_unexpected_exception_from_gauge_remove_is_logged(self, mock_echo, mock_http):
-        """A non-KeyError from gauge.remove() is logged to stderr."""
-        mock_http.return_value = Mock()
-        exporter = Exporter(targets=["http://localhost:8000"], registry=self.registry)
-        exporter.targets = []
-
-        mock_gauge = Mock()
-        mock_gauge._labelnames = []  # no "server" label → server_idx=None → remove() called without server key lookup
-        mock_gauge.remove.side_effect = ValueError("something went wrong")
-
-        exporter._seen_labels_previous = {id(mock_gauge): (mock_gauge, {()})}
-
-        # Must not raise
-        exporter.update()
-
-        # An error message must have been logged (with err=True)
-        err_msgs = [call[0][0] for call in mock_echo.call_args_list if call[1].get("err")]
-        self.assertTrue(
-            any("Unexpected error removing gauge label" in m for m in err_msgs),
-            f"Expected error log; got err= calls: {err_msgs}",
-        )
-
-
-class TestExporterKea32Statistics(unittest.TestCase):
-    """Kea 3.2 expanded the statistics set; the exporter must stay resilient.
-
-    - A global-scope aggregate (e.g. ``assigned-addresses``) that maps to a
-      subnet-scoped gauge must not abort the whole scrape with
-      ``ValueError('Incorrect label names')``.
-    - The new 3.2 packet counters must be exported.
+    The exported names are read back out of the registry rather than off the
+    exporter's own dictionary, so a wrong prefix cannot pass.
     """
+    exporter = Exporter(targets=[], registry=registry)
+    exposition = generate_latest(registry).decode()
 
-    def setUp(self):
-        self.registry = CollectorRegistry()
+    for version, documentation in catalogue.METRICS.items():
+        assert set(exporter.metrics[version]) == set(documentation), version.name
+        prefix = catalogue.METRIC_PREFIX[version]
+        for metric, gauge in exporter.metrics[version].items():
+            entries = catalogue.entries_by_metric(version)[metric]
+            labelnames = catalogue.labelnames(entries)
+            assert exporter.metric_labelnames[version][metric] == labelnames, f"{version.name}:{metric}"
+            gauge.labels(**dict.fromkeys(labelnames, ""))
+            assert f"# HELP {prefix}_{metric} " in exposition, f"{version.name}:{metric} is not registered as such"
 
-    @patch("kea_exporter.exporter.KeaHTTPClient")
-    def _make_exporter(self, mock_http):
-        mock_http.return_value = Mock()
-        return Exporter(targets=["http://localhost:8000"], registry=self.registry)
 
-    def test_global_assigned_addresses_does_not_abort_scrape_dhcp4(self):
-        """A global assigned-addresses must not crash dhcp4 parsing; later stats still export."""
-        exporter = self._make_exporter()
-        server = "http://localhost:8000"
-        arguments = {
-            # global aggregate that maps to the subnet-scoped addresses_assigned_total
-            # gauge — previously raised ValueError('Incorrect label names').
-            "assigned-addresses": [[123, "2024-01-01 00:00:00"]],
-            # a normal stat that must still be exported afterwards
-            "pkt4-discover-received": [[7, "2024-01-01 00:00:00"]],
-        }
-        exporter.parse_metrics(server, DHCPVersion.DHCP4, arguments, subnets={})  # must not raise
-        self.assertEqual(
-            self.registry.get_sample_value(
-                "kea_dhcp4_packets_received_total", {"server": server, "operation": "discover"}
-            ),
-            7,
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("http://localhost:8000", KeaHTTPClient),
+        ("/var/run/kea/control.sock", KeaSocketClient),
+    ],
+)
+def test_the_target_string_chooses_the_adapter(registry, target, expected):
+    """Construction performs no I/O, so this needs no server and no socket."""
+    exporter = Exporter(targets=[target], registry=registry)
+
+    assert len(exporter.targets) == 1
+    assert isinstance(exporter.targets[0], expected)
+
+
+def test_every_target_is_built(registry):
+    exporter = Exporter(
+        targets=["http://localhost:8000", "/var/run/kea/socket1", "http://remote:8001"],
+        registry=registry,
+    )
+
+    assert len(exporter.targets) == 3
+
+
+def test_timeout_reaches_the_adapter(registry):
+    exporter = Exporter(targets=["http://localhost:8000"], timeout=30, registry=registry)
+
+    assert exporter.targets[0].timeout == 30
+
+
+def test_an_unparseable_target_is_reported_and_dropped(registry, capsys):
+    exporter = Exporter(targets=[""], registry=registry)
+
+    assert exporter.targets == []
+    output = capsys.readouterr()
+    assert "Unable to parse target argument" in output.err
+    assert output.out == ""
+
+
+def test_a_misconfigured_target_is_dropped_rather_than_retried(registry, capsys):
+    """Construction only fails on configuration, which retrying cannot fix.
+
+    Mutual TLS with a certificate and no key raises before any connection.
+    """
+    exporter = Exporter(
+        targets=["http://admin:s3cret@kea.local:8000/api"],
+        registry=registry,
+        client_cert="/nonexistent/cert.pem",
+    )
+
+    assert exporter.targets == []
+    output = capsys.readouterr()
+    assert "Failed to initialize target" in output.err
+    assert "admin" not in output.err and "s3cret" not in output.err
+    assert "kea.local:8000" in output.err
+    assert output.out == ""
+
+
+# ------------------------------------------------------------------ scraping
+
+
+def test_update_scrapes_every_target(registry):
+    first = InMemoryTarget("http://server1:8000").add(DHCPVersion.DHCP4, {})
+    second = InMemoryTarget("http://server2:8000").add(DHCPVersion.DHCP6, {})
+
+    exporter_with(registry, first, second).update()
+
+    assert (first.calls, second.calls) == (1, 1)
+
+
+def test_update_exports_what_a_target_reports(registry):
+    target = InMemoryTarget(SERVER).add(DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)})
+
+    report = exporter_with(registry, target).update()
+
+    assert registry.get_sample_value("kea_dhcp4_packets_sent_total", {"server": SERVER, "operation": "ack"}) == 10
+    assert report.label_combinations_updated == 1
+    assert report.stale_labels_removed == 0
+
+
+def test_a_non_numeric_reading_does_not_block_other_readings(registry, capsys):
+    initial = (
+        SERVER,
+        DHCPVersion.DHCP4,
+        {"pkt4-ack-sent": stat(10), "pkt4-discover-received": stat(5)},
+        {},
+    )
+    invalid = (
+        SERVER,
+        DHCPVersion.DHCP4,
+        {"pkt4-ack-sent": stat(20), "pkt4-discover-received": stat("not-a-number")},
+        {},
+    )
+    exporter = exporter_with(registry, ScriptedTarget([initial], [invalid], server_id=SERVER))
+
+    exporter.update()
+    exporter.update()
+
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_packets_sent_total",
+            {"server": SERVER, "operation": "ack"},
         )
-        # The redundant global aggregate was skipped, not exported to the subnet gauge.
-        self.assertIsNone(
-            self.registry.get_sample_value(
-                "kea_dhcp4_addresses_assigned_total",
-                {"server": server, "subnet": "", "subnet_id": "", "pool": ""},
-            )
+        == 20
+    )
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_packets_received_total",
+            {"server": SERVER, "operation": "discover"},
         )
+        is None
+    )
+    assert "value 'not-a-number' is not a number" in capsys.readouterr().err
 
-    def test_global_assigned_nas_and_pds_do_not_abort_scrape_dhcp6(self):
-        """Global assigned-nas / assigned-pds must not crash dhcp6 parsing."""
-        exporter = self._make_exporter()
-        server = "http://localhost:8000"
-        arguments = {
-            "assigned-nas": [[10, "t"]],
-            "assigned-pds": [[5, "t"]],
-            "pkt6-solicit-received": [[3, "t"]],
-        }
-        exporter.parse_metrics(server, DHCPVersion.DHCP6, arguments, subnets={})  # must not raise
-        self.assertEqual(
-            self.registry.get_sample_value(
-                "kea_dhcp6_packets_received_total", {"server": server, "operation": "solicit"}
-            ),
-            3,
+
+def test_an_unhandled_statistic_is_reported_only_to_stderr(registry, capsys):
+    target = InMemoryTarget(SERVER).add(DHCPVersion.DHCP4, {"invented-statistic": stat(1)})
+
+    exporter_with(registry, target).update()
+
+    output = capsys.readouterr()
+    assert "Unhandled statistic 'invented-statistic'" in output.err
+    assert output.out == ""
+
+
+def test_one_failing_target_does_not_stop_the_others(registry, capsys):
+    down = FailingTarget("http://server1:8000", ConnectionError("server1 down"))
+    up = InMemoryTarget("http://server2:8000").add(DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(4)})
+
+    exporter_with(registry, down, up).update()
+
+    assert up.calls == 1
+    assert "server1" in capsys.readouterr().err
+    assert (
+        registry.get_sample_value("kea_dhcp4_packets_sent_total", {"server": "http://server2:8000", "operation": "ack"})
+        == 4
+    )
+
+
+# ------------------------------------------------------------------ reporting a failure
+
+
+def test_a_target_that_stays_down_is_reported_once(registry, capsys):
+    """A host down for hours must not write a line on every scrape."""
+    exporter = exporter_with(registry, FailingTarget(SERVER, ConnectionError("down")))
+
+    for _ in range(5):
+        exporter.update()
+
+    assert capsys.readouterr().err.count("Failed to collect statistics") == 1
+
+
+def test_recovery_is_announced_and_re_arms_the_report(registry, capsys):
+    """The report closes on recovery, so a later outage is reported again."""
+    rows = [(SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(1)}, {})]
+    target = ScriptedTarget(ConnectionError("down"), rows, ConnectionError("down again"), server_id=SERVER)
+    exporter = exporter_with(registry, target)
+
+    exporter.update()
+    exporter.update()
+    exporter.update()
+
+    output = capsys.readouterr()
+    assert output.err.count("Failed to collect statistics") == 2
+    assert f"Collecting statistics from {SERVER} again" in output.err
+    assert output.out == ""
+
+
+def test_a_source_failure_is_reported_once_until_recovery(registry, capsys):
+    failure = SourceFailure(SERVER, DHCPVersion.DHCP4, KeaCommandError("DHCP4 unavailable"))
+    recovered = (SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(1)}, {})
+    target = ScriptedTarget([failure], [failure], [recovered], [failure], server_id=SERVER)
+    exporter = exporter_with(registry, target)
+
+    for _ in range(4):
+        exporter.update()
+
+    output = capsys.readouterr()
+    assert output.err.count(f"Failed to collect DHCP4 source from {SERVER}") == 2
+    assert f"Collecting DHCP4 source from {SERVER} again" in output.err
+    assert output.out == ""
+
+
+# ------------------------------------------------------------------ stale labels
+
+
+def test_renamed_pool_label_is_removed_on_the_next_scrape(registry):
+    new_pool = "10.0.0.100-10.0.0.110"
+    target = ScriptedTarget(
+        [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())],
+        [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(3)}, pool_subnets(pool=new_pool))],
+        server_id=SERVER,
+    )
+    exporter = exporter_with(registry, target)
+
+    exporter.update()
+    assert POOL in exported(registry)
+
+    exporter.update()
+    assert POOL not in exported(registry)
+    assert new_pool in exported(registry)
+
+
+def test_a_standalone_parse_does_not_keep_a_label_omitted_by_the_next_scrape(registry):
+    row = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    empty = (SERVER, DHCPVersion.DHCP4, {}, pool_subnets())
+    exporter = exporter_with(registry, ScriptedTarget([row], [empty], server_id=SERVER))
+
+    exporter.update()
+    exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())
+    exporter.update()
+
+    assert POOL not in exported(registry)
+
+
+def test_a_label_is_kept_when_the_scrape_fails(registry):
+    target = ScriptedTarget(
+        [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())],
+        ConnectionError("target down"),
+        server_id=SERVER,
+    )
+    exporter = exporter_with(registry, target)
+
+    exporter.update()
+    exporter.update()
+
+    assert POOL in exported(registry)
+
+
+def test_a_scraped_source_prunes_its_stale_label_without_pruning_a_failed_source(registry):
+    server_a = "http://kea-a:53100"
+    server_b = "http://kea-b:53100"
+    new_pool = "10.0.0.100-10.0.0.110"
+    pool_b = "10.1.0.100-10.1.0.200"
+    row_a1 = (server_a, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    row_a2 = (server_a, DHCPVersion.DHCP4, {ASSIGNED: stat(3)}, pool_subnets(pool=new_pool))
+    row_b = (
+        server_b,
+        DHCPVersion.DHCP4,
+        {ASSIGNED: stat(7)},
+        pool_subnets(subnet="10.1.0.0/24", pool=pool_b),
+    )
+    target_a = ScriptedTarget([row_a1], [row_a2], server_id=server_a)
+    target_b = ScriptedTarget([row_b], ConnectionError("target down"), server_id=server_b)
+    exporter = exporter_with(registry, target_a, target_b)
+
+    exporter.update()
+    exporter.update()
+
+    exposition = exported(registry)
+    assert POOL not in exposition
+    assert new_pool in exposition
+    assert pool_b in exposition
+
+
+def test_a_label_is_pruned_once_the_stale_timeout_passes(registry, clock):
+    """success, then a failure inside the timeout, then one past it."""
+    target = ScriptedTarget(
+        [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())],
+        ConnectionError("target down"),
+        ConnectionError("target down"),
+        server_id=SERVER,
+    )
+    exporter = exporter_with(registry, target, stale_timeout=60)
+
+    exporter.update()
+    assert POOL in exported(registry)
+
+    clock["t"] = 30.0
+    exporter.update()
+    assert POOL in exported(registry)
+
+    clock["t"] = 61.0
+    exporter.update()
+    assert POOL not in exported(registry)
+
+
+def test_a_label_is_never_pruned_when_the_timeout_is_disabled(registry, clock):
+    target = ScriptedTarget(
+        [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())],
+        ConnectionError("target down"),
+        ConnectionError("target down"),
+        server_id=SERVER,
+    )
+    exporter = exporter_with(registry, target, stale_timeout=0)
+
+    exporter.update()
+    clock["t"] = 9999.0
+    exporter.update()
+    exporter.update()
+
+    assert POOL in exported(registry)
+
+
+def test_the_stale_timeout_is_off_by_default(registry):
+    assert Exporter(targets=[], registry=registry).lifecycle.stale_timeout == 0
+
+
+def test_dhcp6_labels_survive_a_scrape_where_that_source_fails(registry):
+    pool6 = "2001:db8::10-2001:db8::20"
+    subnets6 = {SUBNET_ID: {"subnet": "2001:db8::/64", "pools": [{"pool": pool6}]}}
+    row4 = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    row6 = (SERVER, DHCPVersion.DHCP6, {"subnet[1].pool[0].assigned-nas": stat(3)}, subnets6)
+    failed6 = SourceFailure(SERVER, DHCPVersion.DHCP6, KeaCommandError("DHCP6 unavailable"))
+
+    exporter = exporter_with(registry, ScriptedTarget([row4, row6], [row4, failed6], server_id=SERVER))
+
+    exporter.update()
+    assert POOL in exported(registry) and pool6 in exported(registry)
+
+    exporter.update()
+    assert POOL in exported(registry)
+    assert pool6 in exported(registry), "DHCP6 pool label was pruned when its source failed"
+
+
+def test_no_source_from_a_target_is_scraped_when_a_later_row_fails_to_parse(registry):
+    new_pool = "10.0.0.100-10.0.0.110"
+    original = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    renamed = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(3)}, pool_subnets(pool=new_pool))
+    invalid = (SERVER, DHCPVersion.DHCP6, None, {})
+    exporter = exporter_with(registry, ScriptedTarget([original], [renamed, invalid], server_id=SERVER))
+
+    exporter.update()
+    exporter.update()
+
+    exposition = exported(registry)
+    assert POOL in exposition
+    assert new_pool not in exposition
+
+
+# ------------------------------------------------------------------ Kea 3.2 statistics
+
+
+def test_a_global_aggregate_does_not_abort_a_dhcp4_scrape(registry):
+    """assigned-addresses arrives globally in 3.2 and maps to a subnet gauge."""
+    exporter = exporter_with(registry)
+
+    exporter.parse_metrics(
+        SERVER,
+        DHCPVersion.DHCP4,
+        {"assigned-addresses": stat(123), "pkt4-discover-received": stat(7)},
+        subnets={},
+    )
+
+    assert (
+        registry.get_sample_value("kea_dhcp4_packets_received_total", {"server": SERVER, "operation": "discover"}) == 7
+    )
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_addresses_assigned_total",
+            {"server": SERVER, "subnet": "", "subnet_id": "", "pool": ""},
         )
-
-    def test_set_metric_skips_scope_mismatch_instead_of_raising(self):
-        """_set_metric returns False (no raise) when labels don't cover the gauge's labelnames."""
-        exporter = self._make_exporter()
-        gauge = exporter.metrics_dhcp4["addresses_assigned_total"]  # [server, subnet, subnet_id, pool]
-        # global scope: only 'server' provided → skip, no raise
-        self.assertFalse(exporter._set_metric(gauge, {"server": "s"}, 1))
-        # full label set → value is set
-        self.assertTrue(
-            exporter._set_metric(gauge, {"server": "s", "subnet": "10.0.0.0/24", "subnet_id": 1, "pool": ""}, 1)
-        )
-
-    def test_new_pkt4_counters_exported(self):
-        """The new Kea 3.2 pkt4-* counters map to packets_received/sent_total."""
-        exporter = self._make_exporter()
-        server = "http://localhost:8000"
-        arguments = {
-            "pkt4-lease-query-received": [[1, "t"]],
-            "pkt4-lease-query-response-active-sent": [[2, "t"]],
-            "pkt4-duplicate": [[3, "t"]],
-            "pkt4-service-disabled": [[4, "t"]],
-        }
-        exporter.parse_metrics(server, DHCPVersion.DHCP4, arguments, subnets={})
-        gsv = self.registry.get_sample_value
-        self.assertEqual(gsv("kea_dhcp4_packets_received_total", {"server": server, "operation": "lease-query"}), 1)
-        self.assertEqual(
-            gsv("kea_dhcp4_packets_sent_total", {"server": server, "operation": "lease-query-response-active"}), 2
-        )
-        self.assertEqual(gsv("kea_dhcp4_packets_received_total", {"server": server, "operation": "duplicate"}), 3)
-        self.assertEqual(
-            gsv("kea_dhcp4_packets_received_total", {"server": server, "operation": "service-disabled"}), 4
-        )
-
-    def test_new_pkt6_counters_exported(self):
-        """The new Kea 3.2 pkt6-* counters map to packets_received/sent_total."""
-        exporter = self._make_exporter()
-        server = "http://localhost:8000"
-        arguments = {
-            "pkt6-lease-query-received": [[1, "t"]],
-            "pkt6-lease-query-reply-sent": [[2, "t"]],
-            "pkt6-queue-full": [[5, "t"]],
-        }
-        exporter.parse_metrics(server, DHCPVersion.DHCP6, arguments, subnets={})
-        gsv = self.registry.get_sample_value
-        self.assertEqual(gsv("kea_dhcp6_packets_received_total", {"server": server, "operation": "lease-query"}), 1)
-        self.assertEqual(gsv("kea_dhcp6_packets_sent_total", {"server": server, "operation": "lease-query-reply"}), 2)
-        self.assertEqual(gsv("kea_dhcp6_packets_received_total", {"server": server, "operation": "queue-full"}), 5)
+        is None
+    )
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_global_nas_and_pds_do_not_abort_a_dhcp6_scrape(registry):
+    exporter = exporter_with(registry)
+
+    exporter.parse_metrics(
+        SERVER,
+        DHCPVersion.DHCP6,
+        {"assigned-nas": stat(10), "assigned-pds": stat(5), "pkt6-solicit-received": stat(3)},
+        subnets={},
+    )
+
+    assert (
+        registry.get_sample_value("kea_dhcp6_packets_received_total", {"server": SERVER, "operation": "solicit"}) == 3
+    )
+
+
+def test_the_new_pkt4_counters_are_exported(registry):
+    exporter = exporter_with(registry)
+
+    exporter.parse_metrics(
+        SERVER,
+        DHCPVersion.DHCP4,
+        {
+            "pkt4-lease-query-received": stat(1),
+            "pkt4-lease-query-response-active-sent": stat(2),
+            "pkt4-duplicate": stat(3),
+            "pkt4-service-disabled": stat(4),
+        },
+        subnets={},
+    )
+
+    sample = registry.get_sample_value
+    assert sample("kea_dhcp4_packets_received_total", {"server": SERVER, "operation": "lease-query"}) == 1
+    assert sample("kea_dhcp4_packets_sent_total", {"server": SERVER, "operation": "lease-query-response-active"}) == 2
+    assert sample("kea_dhcp4_packets_received_total", {"server": SERVER, "operation": "duplicate"}) == 3
+    assert sample("kea_dhcp4_packets_received_total", {"server": SERVER, "operation": "service-disabled"}) == 4
+
+
+def test_the_new_pkt6_counters_are_exported(registry):
+    exporter = exporter_with(registry)
+
+    exporter.parse_metrics(
+        SERVER,
+        DHCPVersion.DHCP6,
+        {
+            "pkt6-lease-query-received": stat(1),
+            "pkt6-lease-query-reply-sent": stat(2),
+            "pkt6-queue-full": stat(5),
+        },
+        subnets={},
+    )
+
+    sample = registry.get_sample_value
+    assert sample("kea_dhcp6_packets_received_total", {"server": SERVER, "operation": "lease-query"}) == 1
+    assert sample("kea_dhcp6_packets_sent_total", {"server": SERVER, "operation": "lease-query-reply"}) == 2
+    assert sample("kea_dhcp6_packets_received_total", {"server": SERVER, "operation": "queue-full"}) == 5
