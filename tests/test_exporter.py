@@ -47,24 +47,17 @@ def exported(registry):
 # ------------------------------------------------------------------ building targets
 
 
-def test_builds_a_gauge_for_every_catalogued_metric(registry):
-    """Every metric the catalogue declares is registered, for every daemon.
+def test_registers_every_catalogued_metric_family(registry):
+    """Every Catalogue Metric is visible through the Prometheus registry."""
+    Exporter(targets=[], registry=registry)
 
-    The exported names are read back out of the registry rather than off the
-    exporter's own dictionary, so a wrong prefix cannot pass.
-    """
-    exporter = Exporter(targets=[], registry=registry)
-    exposition = generate_latest(registry).decode()
-
+    families = {family.name: family for family in registry.collect()}
     for version, documentation in catalogue.METRICS.items():
-        assert set(exporter.metrics[version]) == set(documentation), version.name
         prefix = catalogue.METRIC_PREFIX[version]
-        for metric, gauge in exporter.metrics[version].items():
-            entries = catalogue.entries_by_metric(version)[metric]
-            labelnames = catalogue.labelnames(entries)
-            assert exporter.metric_labelnames[version][metric] == labelnames, f"{version.name}:{metric}"
-            gauge.labels(**dict.fromkeys(labelnames, ""))
-            assert f"# HELP {prefix}_{metric} " in exposition, f"{version.name}:{metric} is not registered as such"
+        for metric, expected_documentation in documentation.items():
+            family = families[f"{prefix}_{metric}"]
+            assert family.type == "gauge"
+            assert family.documentation == expected_documentation
 
 
 @pytest.mark.parametrize(
@@ -270,22 +263,25 @@ def test_renamed_pool_label_is_removed_on_the_next_scrape(registry):
     assert new_pool in exported(registry)
 
 
-def test_a_standalone_parse_does_not_keep_a_label_omitted_by_the_next_scrape(registry):
+def test_a_successful_empty_source_removes_its_previous_labels(registry):
     row = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
     empty = (SERVER, DHCPVersion.DHCP4, {}, pool_subnets())
     exporter = exporter_with(registry, ScriptedTarget([row], [empty], server_id=SERVER))
 
     exporter.update()
-    exporter.parse_metrics(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())
+    assert POOL in exported(registry)
+
     exporter.update()
 
     assert POOL not in exported(registry)
 
 
-def test_a_label_is_kept_when_the_scrape_fails(registry):
+def test_a_failed_source_keeps_its_labels_until_the_next_success(registry):
+    empty = (SERVER, DHCPVersion.DHCP4, {}, pool_subnets())
     target = ScriptedTarget(
         [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())],
         ConnectionError("target down"),
+        [empty],
         server_id=SERVER,
     )
     exporter = exporter_with(registry, target)
@@ -294,6 +290,10 @@ def test_a_label_is_kept_when_the_scrape_fails(registry):
     exporter.update()
 
     assert POOL in exported(registry)
+
+    exporter.update()
+
+    assert POOL not in exported(registry)
 
 
 def test_a_scraped_source_prunes_its_stale_label_without_pruning_a_failed_source(registry):
@@ -335,23 +335,23 @@ def test_a_label_is_pruned_once_the_stale_timeout_passes(registry, clock):
     exporter.update()
     assert POOL in exported(registry)
 
-    clock["t"] = 30.0
+    clock["t"] = 60.0
     exporter.update()
     assert POOL in exported(registry)
 
-    clock["t"] = 61.0
+    clock["t"] = 60.1
     exporter.update()
     assert POOL not in exported(registry)
 
 
-def test_a_label_is_never_pruned_when_the_timeout_is_disabled(registry, clock):
+def test_the_default_stale_timeout_never_prunes_a_failed_source(registry, clock):
     target = ScriptedTarget(
         [(SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(7)}, pool_subnets())],
         ConnectionError("target down"),
         ConnectionError("target down"),
         server_id=SERVER,
     )
-    exporter = exporter_with(registry, target, stale_timeout=0)
+    exporter = exporter_with(registry, target)
 
     exporter.update()
     clock["t"] = 9999.0
@@ -359,10 +359,6 @@ def test_a_label_is_never_pruned_when_the_timeout_is_disabled(registry, clock):
     exporter.update()
 
     assert POOL in exported(registry)
-
-
-def test_the_stale_timeout_is_off_by_default(registry):
-    assert Exporter(targets=[], registry=registry).lifecycle.stale_timeout == 0
 
 
 def test_dhcp6_labels_survive_a_scrape_where_that_source_fails(registry):
@@ -402,14 +398,13 @@ def test_no_source_from_a_target_is_scraped_when_a_later_row_fails_to_parse(regi
 
 def test_a_global_aggregate_does_not_abort_a_dhcp4_scrape(registry):
     """assigned-addresses arrives globally in 3.2 and maps to a subnet gauge."""
-    exporter = exporter_with(registry)
-
-    exporter.parse_metrics(
-        SERVER,
+    target = InMemoryTarget(SERVER).add(
         DHCPVersion.DHCP4,
         {"assigned-addresses": stat(123), "pkt4-discover-received": stat(7)},
         subnets={},
     )
+
+    exporter_with(registry, target).update()
 
     assert (
         registry.get_sample_value("kea_dhcp4_packets_received_total", {"server": SERVER, "operation": "discover"}) == 7
@@ -424,14 +419,13 @@ def test_a_global_aggregate_does_not_abort_a_dhcp4_scrape(registry):
 
 
 def test_global_nas_and_pds_do_not_abort_a_dhcp6_scrape(registry):
-    exporter = exporter_with(registry)
-
-    exporter.parse_metrics(
-        SERVER,
+    target = InMemoryTarget(SERVER).add(
         DHCPVersion.DHCP6,
         {"assigned-nas": stat(10), "assigned-pds": stat(5), "pkt6-solicit-received": stat(3)},
         subnets={},
     )
+
+    exporter_with(registry, target).update()
 
     assert (
         registry.get_sample_value("kea_dhcp6_packets_received_total", {"server": SERVER, "operation": "solicit"}) == 3
@@ -439,10 +433,7 @@ def test_global_nas_and_pds_do_not_abort_a_dhcp6_scrape(registry):
 
 
 def test_the_new_pkt4_counters_are_exported(registry):
-    exporter = exporter_with(registry)
-
-    exporter.parse_metrics(
-        SERVER,
+    target = InMemoryTarget(SERVER).add(
         DHCPVersion.DHCP4,
         {
             "pkt4-lease-query-received": stat(1),
@@ -453,6 +444,8 @@ def test_the_new_pkt4_counters_are_exported(registry):
         subnets={},
     )
 
+    exporter_with(registry, target).update()
+
     sample = registry.get_sample_value
     assert sample("kea_dhcp4_packets_received_total", {"server": SERVER, "operation": "lease-query"}) == 1
     assert sample("kea_dhcp4_packets_sent_total", {"server": SERVER, "operation": "lease-query-response-active"}) == 2
@@ -461,10 +454,7 @@ def test_the_new_pkt4_counters_are_exported(registry):
 
 
 def test_the_new_pkt6_counters_are_exported(registry):
-    exporter = exporter_with(registry)
-
-    exporter.parse_metrics(
-        SERVER,
+    target = InMemoryTarget(SERVER).add(
         DHCPVersion.DHCP6,
         {
             "pkt6-lease-query-received": stat(1),
@@ -473,6 +463,8 @@ def test_the_new_pkt6_counters_are_exported(registry):
         },
         subnets={},
     )
+
+    exporter_with(registry, target).update()
 
     sample = registry.get_sample_value
     assert sample("kea_dhcp6_packets_received_total", {"server": SERVER, "operation": "lease-query"}) == 1

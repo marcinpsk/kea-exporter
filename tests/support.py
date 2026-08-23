@@ -1,9 +1,9 @@
 """Test doubles that let tests drive the real Exporter and the real adapters.
 
-The in-memory targets exercise real Gauge objects in a real CollectorRegistry,
-so assertions read the exported series rather than a mirrored copy of a gauge's
-label list. The HTTP and Unix socket servers are real servers on real sockets,
-so an adapter test covers the transport it claims to cover.
+The in-memory targets drive complete scrape cycles into a real
+CollectorRegistry, so assertions read the exported metrics through the same
+seam as production. The HTTP and Unix socket servers are real servers on real
+sockets, so an adapter test covers the transport it claims to cover.
 """
 
 import json
@@ -214,6 +214,11 @@ class ScriptedTarget:
     def server_id(self):
         return self._server_id
 
+    def queue(self, *scrapes):
+        """Append successive scrape outcomes to the script."""
+        self.scrapes.extend(scrapes)
+        return self
+
     def stats(self):
         self.calls += 1
         outcome = self.scrapes.pop(0) if self.scrapes else []
@@ -243,6 +248,19 @@ def exporter_with(registry, *targets, **kwargs):
     exporter = Exporter(targets=[], registry=registry, **kwargs)
     exporter.targets = list(targets)
     return exporter
+
+
+class ScrapeCycleDriver:
+    """Drive successive scrape cycles through one real Exporter."""
+
+    def __init__(self, registry, server_id="memory://kea", **kwargs):
+        self.target = ScriptedTarget(server_id=server_id)
+        self.exporter = exporter_with(registry, self.target, **kwargs)
+
+    def __call__(self, daemon, arguments, subnets):
+        """Make one Source result available, then complete one scrape cycle."""
+        self.target.queue([(self.target.server_id, daemon, arguments, subnets)])
+        return self.exporter.update()
 
 
 def samples(registry, name):
