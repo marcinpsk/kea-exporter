@@ -264,7 +264,7 @@ class Exporter:
     def update(self) -> ScrapeReport:
         """Serialize and complete one unconditional Scrape cycle."""
         with self._scrape_lock:
-            return self._complete_update()
+            return self._complete_scrape_cycle_locked()
 
     def update_if_due(self, interval: int) -> ScrapeReport | None:
         """Complete one Scrape cycle if the interval in seconds has elapsed."""
@@ -272,17 +272,11 @@ class Exporter:
             now = time.monotonic()
             if self._last_scrape_completed_at is not None and now - self._last_scrape_completed_at < interval:
                 return None
-            return self._complete_update()
+            return self._complete_scrape_cycle_locked()
 
-    def _complete_update(self) -> ScrapeReport:
-        """Complete one locked Scrape cycle and record its completion time."""
-        report = self._update()
-        self._last_scrape_completed_at = time.monotonic()
-        return report
-
-    def _update(self) -> ScrapeReport:
+    def _complete_scrape_cycle_locked(self) -> ScrapeReport:
         """
-        Fetch statistics from all configured targets and update the metrics.
+        Fetch statistics and publish one completed state while locked.
 
         Successful Source results publish only after all successful results
         from that Target validate. Failed Sources keep their previous
@@ -351,7 +345,7 @@ class Exporter:
         )
         stale_labels_removed += expired_labels_removed
         self._snapshots = next_snapshots
-        return ScrapeReport(
+        report = ScrapeReport(
             targets_total=len(self.targets),
             targets_reached=targets_reached,
             sources_total=sources_total,
@@ -361,6 +355,8 @@ class Exporter:
             stale_labels_removed=stale_labels_removed,
             elapsed_seconds=time.monotonic() - started_at,
         )
+        self._last_scrape_completed_at = time.monotonic()
+        return report
 
     def _expire_snapshots(
         self,

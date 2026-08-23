@@ -219,6 +219,7 @@ class ScriptedTarget:
         self._server_id = server_id
         self.scrapes = list(scrapes)
         self.calls = 0
+        self._script_lock = threading.Lock()
 
     @property
     def server_id(self):
@@ -226,48 +227,47 @@ class ScriptedTarget:
 
     def queue(self, *scrapes):
         """Append successive scrape outcomes to the script."""
-        self.scrapes.extend(scrapes)
+        with self._script_lock:
+            self.scrapes.extend(scrapes)
         return self
 
+    def _next_scrape(self):
+        """Take one scripted outcome and return its call number."""
+        with self._script_lock:
+            self.calls += 1
+            call = self.calls
+            outcome = self.scrapes.pop(0) if self.scrapes else []
+        return call, outcome
+
+    def _before_scrape(self, _call):
+        """Let a specialized Target pause after it takes an outcome."""
+
     def stats(self):
-        self.calls += 1
-        outcome = self.scrapes.pop(0) if self.scrapes else []
+        call, outcome = self._next_scrape()
+        self._before_scrape(call)
         if isinstance(outcome, Exception):
             raise outcome
         yield from outcome
 
 
-class PausingTarget:
+class PausingTarget(ScriptedTarget):
     """A real-shape Target that pauses one selected Scrape cycle."""
 
     def __init__(self, *scrapes, pause_on_call=1, server_id="memory://kea"):
-        self._server_id = server_id
-        self.scrapes = list(scrapes)
+        super().__init__(*scrapes, server_id=server_id)
         self.pause_on_call = pause_on_call
-        self.calls = 0
         self.scrape_paused = threading.Event()
         self.release_scrape = threading.Event()
         self.later_scrape_started = threading.Event()
-        self._calls_lock = threading.Lock()
 
-    @property
-    def server_id(self):
-        return self._server_id
-
-    def stats(self):
-        with self._calls_lock:
-            self.calls += 1
-            call = self.calls
-            outcome = self.scrapes.pop(0) if self.scrapes else []
+    def _before_scrape(self, call):
+        """Pause the selected call before it yields its Source results."""
         if call == self.pause_on_call:
             self.scrape_paused.set()
             if not self.release_scrape.wait(timeout=15):
                 raise TimeoutError("paused Scrape cycle was not released")
         elif call > self.pause_on_call:
             self.later_scrape_started.set()
-        if isinstance(outcome, Exception):
-            raise outcome
-        yield from outcome
 
 
 class FailingTarget:
