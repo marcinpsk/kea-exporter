@@ -52,12 +52,16 @@ def test_registers_every_catalogued_metric_family(registry):
     Exporter(targets=[], registry=registry)
 
     families = {family.name: family for family in registry.collect()}
+    exposition = exported(registry)
     for version, documentation in catalogue.METRICS.items():
         prefix = catalogue.METRIC_PREFIX[version]
         for metric, expected_documentation in documentation.items():
-            family = families[f"{prefix}_{metric}"]
+            metric_name = f"{prefix}_{metric}"
+            family = families[metric_name]
             assert family.type == "gauge"
             assert family.documentation == expected_documentation
+            assert f"# HELP {metric_name} {expected_documentation}" in exposition
+            assert f"# TYPE {metric_name} gauge" in exposition
 
 
 @pytest.mark.parametrize(
@@ -138,6 +142,41 @@ def test_update_exports_what_a_target_reports(registry):
     assert registry.get_sample_value("kea_dhcp4_packets_sent_total", {"server": SERVER, "operation": "ack"}) == 10
     assert report.label_combinations_updated == 1
     assert report.stale_labels_removed == 0
+
+
+def test_one_registry_collection_reads_one_completed_scrape_cycle(registry):
+    first = (
+        SERVER,
+        DHCPVersion.DHCP4,
+        {"pkt4-ack-sent": stat(10), "pkt4-discover-received": stat(20)},
+        {},
+    )
+    second = (
+        SERVER,
+        DHCPVersion.DHCP4,
+        {"pkt4-ack-sent": stat(11), "pkt4-discover-received": stat(21)},
+        {},
+    )
+    exporter = exporter_with(registry, ScriptedTarget([first], [second], server_id=SERVER))
+    exporter.update()
+
+    collection = iter(registry.collect())
+    observed = {}
+    sample_names = {"kea_dhcp4_packets_sent_total", "kea_dhcp4_packets_received_total"}
+    for family in collection:
+        matching = {sample.name: sample.value for sample in family.samples if sample.name in sample_names}
+        if matching:
+            observed.update(matching)
+            break
+
+    exporter.update()
+    for family in collection:
+        observed.update({sample.name: sample.value for sample in family.samples if sample.name in sample_names})
+
+    assert observed == {
+        "kea_dhcp4_packets_sent_total": 10,
+        "kea_dhcp4_packets_received_total": 20,
+    }
 
 
 def test_a_non_numeric_reading_does_not_block_other_readings(registry, capsys):
@@ -365,10 +404,11 @@ def test_dhcp6_labels_survive_a_scrape_where_that_source_fails(registry):
     pool6 = "2001:db8::10-2001:db8::20"
     subnets6 = {SUBNET_ID: {"subnet": "2001:db8::/64", "pools": [{"pool": pool6}]}}
     row4 = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(5)}, pool_subnets())
+    changed4 = (SERVER, DHCPVersion.DHCP4, {ASSIGNED: stat(8)}, pool_subnets())
     row6 = (SERVER, DHCPVersion.DHCP6, {"subnet[1].pool[0].assigned-nas": stat(3)}, subnets6)
     failed6 = SourceFailure(SERVER, DHCPVersion.DHCP6, KeaCommandError("DHCP6 unavailable"))
 
-    exporter = exporter_with(registry, ScriptedTarget([row4, row6], [row4, failed6], server_id=SERVER))
+    exporter = exporter_with(registry, ScriptedTarget([row4, row6], [changed4, failed6], server_id=SERVER))
 
     exporter.update()
     assert POOL in exported(registry) and pool6 in exported(registry)
@@ -376,6 +416,13 @@ def test_dhcp6_labels_survive_a_scrape_where_that_source_fails(registry):
     exporter.update()
     assert POOL in exported(registry)
     assert pool6 in exported(registry), "DHCP6 pool label was pruned when its source failed"
+    assert (
+        registry.get_sample_value(
+            "kea_dhcp4_addresses_assigned_total",
+            {"server": SERVER, "subnet": SUBNET, "subnet_id": "1", "pool": POOL},
+        )
+        == 8
+    )
 
 
 def test_no_source_from_a_target_is_scraped_when_a_later_row_fails_to_parse(registry):
