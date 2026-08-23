@@ -67,8 +67,9 @@ class Exporter:
 
     def __init__(self, targets, stale_timeout: int = 0, registry=None, **kwargs) -> None:
         """
-        Initialize the Exporter: build the Prometheus metrics declared by the
-        catalogue, prepare tracking state, and create a client for each target.
+        Initialize the Exporter: create and validate each target, build the
+        Prometheus metrics declared by the catalogue, and prepare tracking
+        state.
 
         Parameters:
             targets (Iterable[str]): Iterable of target addresses. Each target
@@ -85,6 +86,34 @@ class Exporter:
         from prometheus_client import REGISTRY
 
         self.registry = registry or REGISTRY
+
+        # Targets a scrape can be attempted against. Building one performs no
+        # I/O, so anything that raises below is a configuration error that
+        # retrying cannot fix, and that target is dropped rather than kept as a
+        # placeholder to retry.
+        self.targets: list[KeaTarget] = []
+        for target in targets:
+            try:
+                url = urlparse(target)
+                if url.scheme:
+                    self.targets.append(KeaHTTPClient(target, **kwargs))
+                elif url.path:
+                    self.targets.append(KeaSocketClient(target, **kwargs))
+                else:
+                    click.echo(f"Unable to parse target argument: {target}", err=True)
+            except Exception as ex:
+                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
+
+        seen_target_identities = set()
+        duplicate_target_identities = []
+        for target in self.targets:
+            if target.server_id in seen_target_identities and target.server_id not in duplicate_target_identities:
+                duplicate_target_identities.append(target.server_id)
+            seen_target_identities.add(target.server_id)
+        if duplicate_target_identities:
+            raise DuplicateTargetIdentityError(
+                "Target identity is configured more than once: " + ", ".join(duplicate_target_identities)
+            )
 
         # metrics[version][metric_name] -> Gauge, built from the catalogue.
         self.metrics = {}
@@ -109,38 +138,10 @@ class Exporter:
 
         self.lifecycle = LabelLifecycle(stale_timeout)
 
-        # Targets a scrape can be attempted against. Building one performs no
-        # I/O, so anything that raises below is a configuration error that
-        # retrying cannot fix, and that target is dropped rather than kept as a
-        # placeholder to retry.
-        self.targets: list[KeaTarget] = []
         # server_id of every target whose last scrape failed, so a target that
         # stays down is reported once rather than once per scrape.
         self._failing_targets: set[str] = set()
         self._failing_sources: set[Source] = set()
-
-        for target in targets:
-            try:
-                url = urlparse(target)
-                if url.scheme:
-                    self.targets.append(KeaHTTPClient(target, **kwargs))
-                elif url.path:
-                    self.targets.append(KeaSocketClient(target, **kwargs))
-                else:
-                    click.echo(f"Unable to parse target argument: {target}", err=True)
-            except Exception as ex:
-                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
-
-        seen_target_identities = set()
-        duplicate_target_identities = []
-        for target in self.targets:
-            if target.server_id in seen_target_identities and target.server_id not in duplicate_target_identities:
-                duplicate_target_identities.append(target.server_id)
-            seen_target_identities.add(target.server_id)
-        if duplicate_target_identities:
-            raise DuplicateTargetIdentityError(
-                "Target identity is configured more than once: " + ", ".join(duplicate_target_identities)
-            )
 
     def _build_metrics(self, version: DHCPVersion) -> tuple[dict, dict]:
         """Create one Gauge per metric the catalogue declares for this daemon."""

@@ -200,6 +200,18 @@ def test_cli_rejects_duplicate_targets_before_collecting_or_serving(cli_runtime,
     assert cli_runtime.httpd.app is None
 
 
+def test_cli_can_start_with_corrected_targets_after_duplicate_rejection(cli_runtime, http_server):
+    kea = http_server()
+    rejected = cli_runtime.invoke(kea.target, kea.target)
+    assert rejected.exit_code == 1
+
+    corrected = cli_runtime.invoke(kea.target)
+
+    assert corrected.exit_code == 0
+    assert statistic_request_count(kea) == 1
+    assert cli_runtime.httpd.app is not None
+
+
 def test_cli_rejects_credential_variants_without_exposing_secrets(cli_runtime, http_server, tmp_path):
     kea = http_server()
     certificate = tmp_path / "private-client-certificate.pem"
