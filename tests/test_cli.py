@@ -529,20 +529,43 @@ def test_wsgi_render_does_not_block_the_next_scrape_cycle(cli_runtime, http_serv
     kea = http_server()
     result = cli_runtime.invoke("--interval", "0", kea.target)
     assert result.exit_code == 0
-    first_response_started = threading.Event()
-    second_response_started = threading.Event()
-    release_first_response = threading.Event()
+    first_render = threading.Event()
+    second_render = threading.Event()
+    release_first_render = threading.Event()
     errors = Queue()
+
+    class BlockingCollector:
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def describe(self):
+            return ()
+
+        def collect(self):
+            with self.lock:
+                self.calls += 1
+                call = self.calls
+            if call == 1:
+                first_render.set()
+                if not release_first_render.wait(timeout=15):
+                    raise TimeoutError("Prometheus rendering was not released")
+            else:
+                second_render.set()
+            return ()
+
+    collector = BlockingCollector()
+    cli_runtime.registry.register(collector)
 
     def first_scrape():
         try:
-            scrape(cli_runtime.httpd.app, first_response_started, release_first_response)
+            scrape(cli_runtime.httpd.app)
         except Exception as error:
             errors.put(error)
 
     def second_scrape():
         try:
-            scrape(cli_runtime.httpd.app, second_response_started)
+            scrape(cli_runtime.httpd.app)
         except Exception as error:
             errors.put(error)
 
@@ -552,19 +575,20 @@ def test_wsgi_render_does_not_block_the_next_scrape_cycle(cli_runtime, http_serv
     ]
     workers[0].start()
     try:
-        assert first_response_started.wait(timeout=15)
+        assert first_render.wait(timeout=15)
         workers[1].start()
-        second_response_started_while_first_waited = second_response_started.wait(timeout=1)
+        second_render_started_while_first_waited = second_render.wait(timeout=1)
     finally:
-        release_first_response.set()
+        release_first_render.set()
         for worker in workers:
             if worker.ident is not None:
                 worker.join(timeout=15)
+        cli_runtime.registry.unregister(collector)
 
     assert not [worker for worker in workers if worker.is_alive()], "concurrent scrapes did not finish"
     if not errors.empty():
         raise errors.get()
-    assert second_response_started_while_first_waited, "Prometheus rendering held the Scrape-cycle lock"
+    assert second_render_started_while_first_waited, "Prometheus rendering held the Scrape-cycle lock"
     assert statistic_request_count(kea) == 3
 
 
