@@ -1,6 +1,5 @@
 import signal
 import sys
-import threading
 import time
 from typing import Any
 
@@ -107,31 +106,25 @@ def cli(port, address, interval, verbose, **kwargs: Any):
     if not exporter.targets:
         sys.exit(1)
 
-    def collect():
-        report = exporter.update()
+    def report_scrape(report):
         if verbose:
             click.echo(report.summary(), err=True)
 
     click.echo(f"Starting {__project__} {__version__}", err=True)
-    collect()
+    report_scrape(exporter.update())
     try:
         httpd, _ = start_http_server(port, address)
     except OSError as ex:
         raise click.ClickException(f"Cannot listen on http://{address}:{port}: {ex}") from ex
 
-    last_update = time.monotonic()
-    update_lock = threading.Lock()
-
     def local_wsgi_app(registry):
         func = make_wsgi_app(registry, False)
 
         def app(environ, start_response):
-            nonlocal last_update
-            with update_lock:
-                if time.monotonic() - last_update >= interval:
-                    collect()
-                    last_update = time.monotonic()
-                return list(func(environ, start_response))
+            report = exporter.update_if_due(interval)
+            if report is not None:
+                report_scrape(report)
+            return list(func(environ, start_response))
 
         return app
 

@@ -1,4 +1,5 @@
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -202,6 +203,8 @@ class Exporter:
         self._definitions_by_identity = {definition.identity: definition for definition in self._definitions}
         self._snapshots: Mapping[_Source, _SourceSnapshot] = {}
         self._stale_timeout = stale_timeout
+        self._scrape_lock = threading.Lock()
+        self._last_scrape_completed_at: float | None = None
         self._collector = _SnapshotCollector(self._definitions, lambda: self._snapshots)
         self.registry.register(self._collector)
 
@@ -259,6 +262,25 @@ class Exporter:
         click.echo(f"Collecting {daemon.name} source from {server_id} again", err=True)
 
     def update(self) -> ScrapeReport:
+        """Serialize and complete one unconditional Scrape cycle."""
+        with self._scrape_lock:
+            return self._complete_update()
+
+    def update_if_due(self, interval: int) -> ScrapeReport | None:
+        """Complete one Scrape cycle if the interval in seconds has elapsed."""
+        with self._scrape_lock:
+            now = time.monotonic()
+            if self._last_scrape_completed_at is not None and now - self._last_scrape_completed_at < interval:
+                return None
+            return self._complete_update()
+
+    def _complete_update(self) -> ScrapeReport:
+        """Complete one locked Scrape cycle and record its completion time."""
+        report = self._update()
+        self._last_scrape_completed_at = time.monotonic()
+        return report
+
+    def _update(self) -> ScrapeReport:
         """
         Fetch statistics from all configured targets and update the metrics.
 
@@ -273,6 +295,7 @@ class Exporter:
         statistics_received = 0
         updated_label_combinations: set[tuple[_MetricIdentity, tuple[str, ...]]] = set()
         stale_labels_removed = 0
+        next_snapshots = dict(self._snapshots)
 
         for target in self.targets:
             try:
@@ -300,17 +323,15 @@ class Exporter:
                     completed_sources.add(source)
 
                 collected_at = time.monotonic()
-                next_snapshots = dict(self._snapshots)
                 target_label_combinations = set()
                 for source, samples in pending_snapshots.items():
-                    previous = self._snapshots.get(source)
+                    previous = next_snapshots.get(source)
                     if previous is not None:
                         old_labels = {(sample.metric, sample.label_values) for sample in previous.samples}
                         new_labels = {(sample.metric, sample.label_values) for sample in samples}
                         stale_labels_removed += len(old_labels.difference(new_labels))
                     next_snapshots[source] = _SourceSnapshot(samples, collected_at)
                     target_label_combinations.update((sample.metric, sample.label_values) for sample in samples)
-                self._snapshots = next_snapshots
 
                 scraped.update(completed_sources)
                 statistics_received += target_statistics
@@ -323,7 +344,13 @@ class Exporter:
             except Exception as ex:
                 self._report_target_failure(target, ex)
 
-        stale_labels_removed += self._expire_snapshots(scraped, time.monotonic())
+        next_snapshots, expired_labels_removed = self._expire_snapshots(
+            next_snapshots,
+            scraped,
+            time.monotonic(),
+        )
+        stale_labels_removed += expired_labels_removed
+        self._snapshots = next_snapshots
         return ScrapeReport(
             targets_total=len(self.targets),
             targets_reached=targets_reached,
@@ -335,20 +362,25 @@ class Exporter:
             elapsed_seconds=time.monotonic() - started_at,
         )
 
-    def _expire_snapshots(self, scraped: set[_Source], now: float) -> int:
+    def _expire_snapshots(
+        self,
+        snapshots: Mapping[_Source, _SourceSnapshot],
+        scraped: set[_Source],
+        now: float,
+    ) -> tuple[Mapping[_Source, _SourceSnapshot], int]:
         """Remove failed Source snapshots after the configured timeout."""
         if self._stale_timeout == 0:
-            return 0
+            return snapshots, 0
         expired = {
             source
-            for source, snapshot in self._snapshots.items()
+            for source, snapshot in snapshots.items()
             if source not in scraped and now - snapshot.collected_at > self._stale_timeout
         }
         if not expired:
-            return 0
-        removed = sum(len(self._snapshots[source].samples) for source in expired)
-        self._snapshots = {source: snapshot for source, snapshot in self._snapshots.items() if source not in expired}
-        return removed
+            return snapshots, 0
+        removed = sum(len(snapshots[source].samples) for source in expired)
+        retained = {source: snapshot for source, snapshot in snapshots.items() if source not in expired}
+        return retained, removed
 
     def _resolve_selector(self, key, server_id, dhcp_version, subnets):
         """Split a statistic name into its scope, its bare name, and its labels.

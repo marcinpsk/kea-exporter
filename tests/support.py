@@ -29,6 +29,8 @@ class KeaResponse:
     status: int = 200
     chunks: tuple[bytes, ...] | None = None
     delay: float = 0
+    started: threading.Event | None = None
+    release: threading.Event | None = None
 
 
 class KeaControl:
@@ -65,13 +67,22 @@ def _response_bytes(response):
     return response.body if isinstance(response.body, bytes) else json.dumps(response.body).encode()
 
 
+def _wait_for_response(response):
+    """Apply deterministic or timed transport delay to one response."""
+    if response.started is not None:
+        response.started.set()
+    if response.release is not None and not response.release.wait(timeout=15):
+        raise TimeoutError("scripted Kea response was not released")
+    if response.delay:
+        time.sleep(response.delay)
+
+
 class _KeaHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.headers.append(dict(self.headers))
         response = _response(self.server.control.respond(body))
-        if response.delay:
-            time.sleep(response.delay)
+        _wait_for_response(response)
         raw = _response_bytes(response)
         self.send_response(response.status)
         self.send_header("Content-Type", "application/json")
@@ -129,8 +140,7 @@ class _KeaUnixSocketHandler(socketserver.BaseRequestHandler):
             break
 
         response = _response(self.server.control.respond(body))
-        if response.delay:
-            time.sleep(response.delay)
+        _wait_for_response(response)
         chunks = response.chunks or (_response_bytes(response),)
         for chunk in chunks:
             self.request.sendall(chunk)
@@ -222,6 +232,39 @@ class ScriptedTarget:
     def stats(self):
         self.calls += 1
         outcome = self.scrapes.pop(0) if self.scrapes else []
+        if isinstance(outcome, Exception):
+            raise outcome
+        yield from outcome
+
+
+class PausingTarget:
+    """A real-shape Target that pauses one selected Scrape cycle."""
+
+    def __init__(self, *scrapes, pause_on_call=1, server_id="memory://kea"):
+        self._server_id = server_id
+        self.scrapes = list(scrapes)
+        self.pause_on_call = pause_on_call
+        self.calls = 0
+        self.scrape_paused = threading.Event()
+        self.release_scrape = threading.Event()
+        self.later_scrape_started = threading.Event()
+        self._calls_lock = threading.Lock()
+
+    @property
+    def server_id(self):
+        return self._server_id
+
+    def stats(self):
+        with self._calls_lock:
+            self.calls += 1
+            call = self.calls
+            outcome = self.scrapes.pop(0) if self.scrapes else []
+        if call == self.pause_on_call:
+            self.scrape_paused.set()
+            if not self.release_scrape.wait(timeout=15):
+                raise TimeoutError("paused Scrape cycle was not released")
+        elif call > self.pause_on_call:
+            self.later_scrape_started.set()
         if isinstance(outcome, Exception):
             raise outcome
         yield from outcome

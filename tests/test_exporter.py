@@ -5,6 +5,9 @@ one fails. Every test drives a real Exporter against real targets from
 tests.support, so nothing here asserts against a mock of the code under test.
 """
 
+import threading
+from queue import Queue
+
 import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
@@ -13,7 +16,7 @@ from kea_exporter.exporter import Exporter
 from kea_exporter.http import KeaHTTPClient
 from kea_exporter.target import KeaCommandError, SourceFailure
 from kea_exporter.uds import KeaSocketClient
-from tests.support import FailingTarget, InMemoryTarget, ScriptedTarget, exporter_with, stat
+from tests.support import FailingTarget, InMemoryTarget, PausingTarget, ScriptedTarget, exporter_with, stat
 
 SERVER = "http://kea-dhcp4:53100"
 SUBNET_ID = 1
@@ -177,6 +180,176 @@ def test_one_registry_collection_reads_one_completed_scrape_cycle(registry):
         "kea_dhcp4_packets_sent_total": 10,
         "kea_dhcp4_packets_received_total": 20,
     }
+
+
+def test_concurrent_update_calls_do_not_overlap_scrape_cycles(registry):
+    row = (SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)}, {})
+    target = PausingTarget([row], [row], server_id=SERVER)
+    exporter = exporter_with(registry, target)
+    errors = Queue()
+    second_called = threading.Event()
+
+    def update(called=None):
+        if called is not None:
+            called.set()
+        try:
+            exporter.update()
+        except Exception as error:
+            errors.put(error)
+
+    workers = [
+        threading.Thread(target=update, daemon=True),
+        threading.Thread(target=update, args=(second_called,), daemon=True),
+    ]
+    workers[0].start()
+    assert target.scrape_paused.wait(timeout=15)
+    workers[1].start()
+    assert second_called.wait(timeout=15)
+    try:
+        second_scrape_overlapped = target.later_scrape_started.wait(timeout=1)
+    finally:
+        target.release_scrape.set()
+        for worker in workers:
+            worker.join(timeout=15)
+
+    assert not [worker for worker in workers if worker.is_alive()], "concurrent Scrape cycles did not finish"
+    if not errors.empty():
+        raise errors.get()
+    assert not second_scrape_overlapped
+    assert target.calls == 2
+
+
+def test_rendering_reads_the_previous_state_until_the_scrape_cycle_completes(registry):
+    server_a = "http://kea-a:53100"
+    server_b = "http://kea-b:53100"
+    first_a = (server_a, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)}, {})
+    second_a = (server_a, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(11)}, {})
+    first_b = (server_b, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(20)}, {})
+    second_b = (server_b, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(21)}, {})
+    target_a = ScriptedTarget([first_a], [second_a], server_id=server_a)
+    target_b = PausingTarget([first_b], [second_b], pause_on_call=2, server_id=server_b)
+    exporter = exporter_with(registry, target_a, target_b)
+    exporter.update()
+    errors = Queue()
+
+    def update():
+        try:
+            exporter.update()
+        except Exception as error:
+            errors.put(error)
+
+    worker = threading.Thread(target=update, daemon=True)
+    worker.start()
+    assert target_b.scrape_paused.wait(timeout=15)
+    try:
+        labels_a = {"server": server_a, "operation": "ack"}
+        labels_b = {"server": server_b, "operation": "ack"}
+        observed_while_paused = (
+            registry.get_sample_value("kea_dhcp4_packets_sent_total", labels_a),
+            registry.get_sample_value("kea_dhcp4_packets_sent_total", labels_b),
+        )
+    finally:
+        target_b.release_scrape.set()
+        worker.join(timeout=15)
+
+    assert not worker.is_alive(), "paused Scrape cycle did not finish"
+    if not errors.empty():
+        raise errors.get()
+    assert observed_while_paused == (10, 20)
+    assert (
+        registry.get_sample_value("kea_dhcp4_packets_sent_total", labels_a),
+        registry.get_sample_value("kea_dhcp4_packets_sent_total", labels_b),
+    ) == (11, 21)
+
+
+def test_interval_decision_uses_the_last_direct_scrape_cycle(registry, clock):
+    row = (SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)}, {})
+    target = ScriptedTarget([row], [row], server_id=SERVER)
+    exporter = exporter_with(registry, target)
+
+    exporter.update()
+    clock["t"] = 59
+    skipped = exporter.update_if_due(60)
+    clock["t"] = 60
+    completed = exporter.update_if_due(60)
+
+    assert skipped is None
+    assert completed is not None
+    assert target.calls == 2
+
+
+def test_concurrent_interval_decisions_start_only_one_scrape_cycle(registry, clock):
+    row = (SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)}, {})
+    target = PausingTarget([row], [row], [row], pause_on_call=2, server_id=SERVER)
+    exporter = exporter_with(registry, target)
+    exporter.update()
+    clock["t"] = 60
+    callers_ready = threading.Barrier(3)
+    reports = Queue()
+    errors = Queue()
+
+    def update_if_due():
+        try:
+            callers_ready.wait(timeout=15)
+            reports.put(exporter.update_if_due(60))
+        except Exception as error:
+            errors.put(error)
+
+    workers = [threading.Thread(target=update_if_due, daemon=True) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    callers_ready.wait(timeout=15)
+    assert target.scrape_paused.wait(timeout=15)
+    target.release_scrape.set()
+    for worker in workers:
+        worker.join(timeout=15)
+
+    assert not [worker for worker in workers if worker.is_alive()], "interval decisions did not finish"
+    if not errors.empty():
+        raise errors.get()
+    results = [reports.get(), reports.get()]
+    assert sum(report is not None for report in results) == 1
+    assert target.calls == 2
+
+
+def test_interval_decision_waits_for_a_direct_scrape_and_then_rechecks(registry, clock):
+    row = (SERVER, DHCPVersion.DHCP4, {"pkt4-ack-sent": stat(10)}, {})
+    target = PausingTarget([row], [row], [row], pause_on_call=2, server_id=SERVER)
+    exporter = exporter_with(registry, target)
+    exporter.update()
+    clock["t"] = 60
+    errors = Queue()
+    decision_results = Queue()
+    decision_called = threading.Event()
+
+    def direct_update():
+        try:
+            exporter.update()
+        except Exception as error:
+            errors.put(error)
+
+    def conditional_update():
+        decision_called.set()
+        try:
+            decision_results.put(exporter.update_if_due(60))
+        except Exception as error:
+            errors.put(error)
+
+    direct_worker = threading.Thread(target=direct_update, daemon=True)
+    direct_worker.start()
+    assert target.scrape_paused.wait(timeout=15)
+    decision_worker = threading.Thread(target=conditional_update, daemon=True)
+    decision_worker.start()
+    assert decision_called.wait(timeout=15)
+    target.release_scrape.set()
+    direct_worker.join(timeout=15)
+    decision_worker.join(timeout=15)
+
+    assert not direct_worker.is_alive() and not decision_worker.is_alive(), "Scrape-cycle callers did not finish"
+    if not errors.empty():
+        raise errors.get()
+    assert decision_results.get() is None
+    assert target.calls == 2
 
 
 def test_a_non_numeric_reading_does_not_block_other_readings(registry, capsys):
