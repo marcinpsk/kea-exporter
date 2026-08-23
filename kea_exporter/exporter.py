@@ -16,6 +16,10 @@ from kea_exporter.uds import KeaSocketClient
 ISSUE_URL = "https://github.com/marcinpsk/kea-exporter"
 
 
+class DuplicateTargetIdentityError(ValueError):
+    """More than one Target would publish the same server label."""
+
+
 def _quantity(count: int, singular: str, plural: str | None = None) -> str:
     """Format a count with the correct singular or plural noun."""
     noun = singular if count == 1 else plural or f"{singular}s"
@@ -126,6 +130,17 @@ class Exporter:
                     click.echo(f"Unable to parse target argument: {target}", err=True)
             except Exception as ex:
                 click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
+
+        seen_target_identities = set()
+        duplicate_target_identities = []
+        for target in self.targets:
+            if target.server_id in seen_target_identities and target.server_id not in duplicate_target_identities:
+                duplicate_target_identities.append(target.server_id)
+            seen_target_identities.add(target.server_id)
+        if duplicate_target_identities:
+            raise DuplicateTargetIdentityError(
+                "Target identity is configured more than once: " + ", ".join(duplicate_target_identities)
+            )
 
     def _build_metrics(self, version: DHCPVersion) -> tuple[dict, dict]:
         """Create one Gauge per metric the catalogue declares for this daemon."""

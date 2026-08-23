@@ -189,6 +189,43 @@ def test_cli_redacts_credentials_from_an_unparsable_target(cli_runtime):
     assert {metric.name for metric in REGISTRY.collect()} == collectors_before
 
 
+def test_cli_rejects_duplicate_targets_before_collecting_or_serving(cli_runtime, http_server):
+    kea = http_server()
+
+    result = cli_runtime.invoke(kea.target, kea.target)
+
+    assert result.exit_code == 1
+    assert f"Error: Target identity is configured more than once: {kea.target}" in result.stderr
+    assert statistic_request_count(kea) == 0
+    assert cli_runtime.httpd.app is None
+
+
+def test_cli_rejects_credential_variants_without_exposing_secrets(cli_runtime, http_server, tmp_path):
+    kea = http_server()
+    certificate = tmp_path / "private-client-certificate.pem"
+    key = tmp_path / "private-client-key.pem"
+    certificate.touch()
+    key.touch()
+    first = kea.target.replace("http://", "http://first-user:first-password@")
+    second = kea.target.replace("http://", "http://second-user:second-password@")
+
+    result = cli_runtime.invoke(
+        "--client-cert",
+        str(certificate),
+        "--client-key",
+        str(key),
+        first,
+        second,
+    )
+
+    assert result.exit_code == 1
+    assert f"Error: Target identity is configured more than once: {kea.target}" in result.stderr
+    for secret in ("first-user", "first-password", "second-user", "second-password", str(certificate), str(key)):
+        assert secret not in result.output
+    assert statistic_request_count(kea) == 0
+    assert cli_runtime.httpd.app is None
+
+
 def test_cli_announces_startup_and_shutdown(cli_runtime, http_server):
     kea = http_server()
 

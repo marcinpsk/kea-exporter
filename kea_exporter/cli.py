@@ -8,7 +8,7 @@ import click
 from prometheus_client import REGISTRY, make_wsgi_app, start_http_server
 
 from kea_exporter import __project__, __version__
-from kea_exporter.exporter import Exporter
+from kea_exporter.exporter import DuplicateTargetIdentityError, Exporter
 
 
 @click.command(context_settings={"show_default": True})
@@ -99,7 +99,10 @@ def cli(port, address, interval, verbose, **kwargs: Any):
     Prometheus metrics over HTTP. Each request starts a scrape cycle unless
     the configured interval has not elapsed.
     """
-    exporter = Exporter(**kwargs)
+    try:
+        exporter = Exporter(**kwargs)
+    except DuplicateTargetIdentityError as ex:
+        raise click.ClickException(str(ex)) from ex
 
     if not exporter.targets:
         sys.exit(1)
