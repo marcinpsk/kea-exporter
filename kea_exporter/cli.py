@@ -1,6 +1,5 @@
 import signal
 import sys
-import threading
 import time
 from typing import Any
 
@@ -8,7 +7,7 @@ import click
 from prometheus_client import REGISTRY, make_wsgi_app, start_http_server
 
 from kea_exporter import __project__, __version__
-from kea_exporter.exporter import Exporter
+from kea_exporter.exporter import DuplicateTargetIdentityError, Exporter
 
 
 @click.command(context_settings={"show_default": True})
@@ -99,36 +98,33 @@ def cli(port, address, interval, verbose, **kwargs: Any):
     Prometheus metrics over HTTP. Each request starts a scrape cycle unless
     the configured interval has not elapsed.
     """
-    exporter = Exporter(**kwargs)
+    try:
+        exporter = Exporter(**kwargs)
+    except DuplicateTargetIdentityError as ex:
+        raise click.ClickException(str(ex)) from ex
 
     if not exporter.targets:
         sys.exit(1)
 
-    def collect():
-        report = exporter.update()
+    def report_scrape(report):
         if verbose:
             click.echo(report.summary(), err=True)
 
     click.echo(f"Starting {__project__} {__version__}", err=True)
-    collect()
+    report_scrape(exporter.update())
     try:
         httpd, _ = start_http_server(port, address)
     except OSError as ex:
         raise click.ClickException(f"Cannot listen on http://{address}:{port}: {ex}") from ex
 
-    last_update = time.monotonic()
-    update_lock = threading.Lock()
-
     def local_wsgi_app(registry):
         func = make_wsgi_app(registry, False)
 
         def app(environ, start_response):
-            nonlocal last_update
-            with update_lock:
-                if time.monotonic() - last_update >= interval:
-                    collect()
-                    last_update = time.monotonic()
-                return list(func(environ, start_response))
+            report = exporter.update_if_due(interval)
+            if report is not None:
+                report_scrape(report)
+            return list(func(environ, start_response))
 
         return app
 

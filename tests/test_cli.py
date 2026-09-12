@@ -91,7 +91,7 @@ def statistic_request_count(server):
     return sum(request["command"] == "statistic-get-all" for request in server.control.requests)
 
 
-def scrape(app):
+def scrape(app, response_started=None, release_response=None):
     environ = {}
     setup_testing_defaults(environ)
     response = {}
@@ -99,10 +99,15 @@ def scrape(app):
     def start_response(status, headers, _exc_info=None):
         response["status"] = status
         response["headers"] = headers
+        if response_started is not None:
+            response_started.set()
+        if release_response is not None and not release_response.wait(timeout=15):
+            raise TimeoutError("Prometheus response was not released")
 
     body = b"".join(app(environ, start_response))
     assert response["status"] == "200 OK"
     assert body
+    return body
 
 
 def test_help_explains_runtime_behavior_and_shows_defaults():
@@ -187,6 +192,55 @@ def test_cli_redacts_credentials_from_an_unparsable_target(cli_runtime):
     assert "Failed to initialize target <unparsable target with credentials>" in result.stderr
     assert "secret" not in result.output
     assert {metric.name for metric in REGISTRY.collect()} == collectors_before
+
+
+def test_cli_rejects_duplicate_targets_before_collecting_or_serving(cli_runtime, http_server):
+    kea = http_server()
+
+    result = cli_runtime.invoke(kea.target, kea.target)
+
+    assert result.exit_code == 1
+    assert f"Error: Target identity is configured more than once: {kea.target}" in result.stderr
+    assert statistic_request_count(kea) == 0
+    assert cli_runtime.httpd.app is None
+
+
+def test_cli_can_start_with_corrected_targets_after_duplicate_rejection(cli_runtime, http_server):
+    kea = http_server()
+    rejected = cli_runtime.invoke(kea.target, kea.target)
+    assert rejected.exit_code == 1
+
+    corrected = cli_runtime.invoke(kea.target)
+
+    assert corrected.exit_code == 0
+    assert statistic_request_count(kea) == 1
+    assert cli_runtime.httpd.app is not None
+
+
+def test_cli_rejects_credential_variants_without_exposing_secrets(cli_runtime, http_server, tmp_path):
+    kea = http_server()
+    certificate = tmp_path / "private-client-certificate.pem"
+    key = tmp_path / "private-client-key.pem"
+    certificate.touch()
+    key.touch()
+    first = kea.target.replace("http://", "http://first-user:first-password@")
+    second = kea.target.replace("http://", "http://second-user:second-password@")
+
+    result = cli_runtime.invoke(
+        "--client-cert",
+        str(certificate),
+        "--client-key",
+        str(key),
+        first,
+        second,
+    )
+
+    assert result.exit_code == 1
+    assert f"Error: Target identity is configured more than once: {kea.target}" in result.stderr
+    for secret in ("first-user", "first-password", "second-user", "second-password", str(certificate), str(key)):
+        assert secret not in result.output
+    assert statistic_request_count(kea) == 0
+    assert cli_runtime.httpd.app is None
 
 
 def test_cli_announces_startup_and_shutdown(cli_runtime, http_server):
@@ -471,61 +525,115 @@ def test_concurrent_wsgi_requests_share_the_interval_gate(cli_runtime, http_serv
     assert statistic_request_count(kea) == 2
 
 
-def test_wsgi_render_and_update_share_one_lock(cli_runtime, http_server):
+def test_wsgi_render_does_not_block_the_next_scrape_cycle(cli_runtime, http_server):
+    kea = http_server()
+    result = cli_runtime.invoke("--interval", "0", kea.target)
+    assert result.exit_code == 0
+    first_render = threading.Event()
+    second_render = threading.Event()
+    release_first_render = threading.Event()
+    errors = Queue()
+
     class BlockingCollector:
         def __init__(self):
-            self.first_render = threading.Event()
-            self.second_render = threading.Event()
-            self.release_first = threading.Event()
             self.calls = 0
             self.lock = threading.Lock()
 
         def describe(self):
-            return []
+            return ()
 
         def collect(self):
             with self.lock:
                 self.calls += 1
                 call = self.calls
             if call == 1:
-                self.first_render.set()
-                if not self.release_first.wait(timeout=15):
-                    raise TimeoutError("first render was not released")
+                first_render.set()
+                if not release_first_render.wait(timeout=15):
+                    raise TimeoutError("Prometheus rendering was not released")
             else:
-                self.second_render.set()
-            return []
+                second_render.set()
+            return ()
 
-    kea = http_server()
-    result = cli_runtime.invoke("--interval", "0", kea.target)
-    assert result.exit_code == 0
     collector = BlockingCollector()
     cli_runtime.registry.register(collector)
-    errors = Queue()
 
-    def concurrent_scrape():
+    def first_scrape():
         try:
             scrape(cli_runtime.httpd.app)
         except Exception as error:
             errors.put(error)
 
-    workers = [threading.Thread(target=concurrent_scrape, daemon=True) for _ in range(2)]
+    def second_scrape():
+        try:
+            scrape(cli_runtime.httpd.app)
+        except Exception as error:
+            errors.put(error)
+
+    workers = [
+        threading.Thread(target=first_scrape, daemon=True),
+        threading.Thread(target=second_scrape, daemon=True),
+    ]
     workers[0].start()
     try:
-        assert collector.first_render.wait(timeout=15)
+        assert first_render.wait(timeout=15)
         workers[1].start()
-        second_render_started_early = collector.second_render.wait(timeout=5)
+        second_render_started_while_first_waited = second_render.wait(timeout=1)
     finally:
-        collector.release_first.set()
+        release_first_render.set()
         for worker in workers:
             if worker.ident is not None:
                 worker.join(timeout=15)
+        cli_runtime.registry.unregister(collector)
 
     assert not [worker for worker in workers if worker.is_alive()], "concurrent scrapes did not finish"
     if not errors.empty():
         raise errors.get()
-    assert not second_render_started_early, "another scrape started while the first response was rendering"
-    assert collector.second_render.is_set()
+    assert second_render_started_while_first_waited, "Prometheus rendering held the Scrape-cycle lock"
     assert statistic_request_count(kea) == 3
+
+
+def test_request_that_starts_a_scrape_waits_and_renders_the_new_state(cli_runtime, http_server):
+    kea = http_server()
+    result = cli_runtime.invoke("--interval", "0", kea.target)
+    assert result.exit_code == 0
+    response_started = threading.Event()
+    release_response = threading.Event()
+    kea.control.queue(
+        "statistic-get-all",
+        KeaResponse(
+            [{"result": 0, "arguments": {"pkt4-ack-sent": stat(11)}}],
+            started=response_started,
+            release=release_response,
+        ),
+    )
+    responses = Queue()
+    errors = Queue()
+
+    def request_metrics():
+        try:
+            responses.put(scrape(cli_runtime.httpd.app))
+        except Exception as error:
+            errors.put(error)
+
+    worker = threading.Thread(target=request_metrics, daemon=True)
+    worker.start()
+    assert response_started.wait(timeout=15)
+    try:
+        assert worker.is_alive(), "Prometheus request returned before its Scrape cycle completed"
+        assert responses.empty()
+    finally:
+        release_response.set()
+        worker.join(timeout=15)
+
+    assert not worker.is_alive(), "Prometheus request did not finish"
+    if not errors.empty():
+        raise errors.get()
+    metric_line = next(
+        line for line in responses.get().splitlines() if line.startswith(b"kea_dhcp4_packets_sent_total{")
+    )
+    assert b'operation="ack"' in metric_line
+    assert f'server="{kea.target}"'.encode() in metric_line
+    assert metric_line.endswith(b" 11.0")
 
 
 def test_sigint_is_ignored_before_server_shutdown(cli_runtime, http_server, monkeypatch):
