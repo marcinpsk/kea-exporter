@@ -80,12 +80,12 @@ docstring-code-line-length = "dynamic"
 
 [dependency-groups]
 dev = [
-    "ruff==0.16.4",
+    "ruff==0.16.5",
     "coverage[toml]>=7.12.0",
     "pre-commit>=4.0.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "zizmor==1.29.0",
+    "zizmor==1.30.0",
     # tomllib is stdlib from 3.11; CI runs 3.10, where the release-config test needs this.
     "tomli>=2.0.1; python_version < '3.11'",
 ]
