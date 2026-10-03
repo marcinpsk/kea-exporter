@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from kea_exporter import catalogue
-from kea_exporter.exporter import Exporter
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT_DOCS = sorted((ROOT / "docs" / "agents").glob("*.md")) + [ROOT / "AGENTS.md"]
@@ -108,14 +107,6 @@ def test_adr_conflict_example_is_repository_neutral():
 
     assert "ADR-<number> (<topic>)" in text
     assert "event-sourced orders" not in text
-
-
-def test_parse_metrics_documents_its_lifecycle_limit():
-    docstring = " ".join((Exporter.parse_metrics.__doc__ or "").split())
-
-    assert "without recording lifecycle labels" in docstring
-    assert "New label combinations are not eligible for lifecycle pruning" in docstring
-    assert "already tracked by update remains eligible" in docstring
 
 
 def test_adr_0001_states_the_scope_contract_the_exporter_implements():

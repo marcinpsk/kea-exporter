@@ -1,19 +1,95 @@
 import re
+import threading
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import click
-from prometheus_client import Gauge
+from prometheus_client.core import GaugeMetricFamily
 
 from kea_exporter import DHCPVersion, catalogue
 from kea_exporter.catalogue import Scope
 from kea_exporter.http import KeaHTTPClient
-from kea_exporter.lifecycle import LabelLifecycle, Source
 from kea_exporter.target import KeaTarget, SourceFailure
 from kea_exporter.uds import KeaSocketClient
 
 ISSUE_URL = "https://github.com/marcinpsk/kea-exporter"
+
+
+class DuplicateTargetIdentityError(ValueError):
+    """More than one Target would publish the same server label."""
+
+
+_Source = tuple[str, DHCPVersion]
+
+
+@dataclass(frozen=True)
+class _MetricIdentity:
+    """Identify one Catalogue Metric without retaining a Prometheus object."""
+
+    daemon: DHCPVersion
+    name: str
+
+
+@dataclass(frozen=True)
+class _MetricDefinition:
+    """Describe one Metric family that the private collector exposes."""
+
+    identity: _MetricIdentity
+    prometheus_name: str
+    documentation: str
+    labelnames: tuple[str, ...]
+
+    def family(self) -> GaugeMetricFamily:
+        """Create an empty Prometheus family with the declared shape."""
+        return GaugeMetricFamily(
+            self.prometheus_name,
+            self.documentation,
+            labels=self.labelnames,
+        )
+
+
+@dataclass(frozen=True)
+class _MetricSample:
+    """One normalized sample in a Source snapshot."""
+
+    metric: _MetricIdentity
+    label_values: tuple[str, ...]
+    value: float
+
+
+@dataclass(frozen=True)
+class _SourceSnapshot:
+    """The last complete successful state of one Source."""
+
+    samples: tuple[_MetricSample, ...]
+    collected_at: float
+
+
+class _SnapshotCollector:
+    """Materialize Catalogue Metric families from completed Source snapshots."""
+
+    def __init__(
+        self,
+        definitions: tuple[_MetricDefinition, ...],
+        read_snapshots: Callable[[], Mapping[_Source, _SourceSnapshot]],
+    ) -> None:
+        self._definitions = definitions
+        self._read_snapshots = read_snapshots
+
+    def describe(self) -> tuple[GaugeMetricFamily, ...]:
+        """Declare all Metric names to the Prometheus registry."""
+        return tuple(definition.family() for definition in self._definitions)
+
+    def collect(self) -> tuple[GaugeMetricFamily, ...]:
+        """Read one completed state and materialize all Metric families."""
+        snapshots = self._read_snapshots()
+        families = {definition.identity: definition.family() for definition in self._definitions}
+        for snapshot in snapshots.values():
+            for sample in snapshot.samples:
+                families[sample.metric].add_metric(sample.label_values, sample.value)
+        return tuple(families.values())
 
 
 def _quantity(count: int, singular: str, plural: str | None = None) -> str:
@@ -63,8 +139,9 @@ class Exporter:
 
     def __init__(self, targets, stale_timeout: int = 0, registry=None, **kwargs) -> None:
         """
-        Initialize the Exporter: build the Prometheus metrics declared by the
-        catalogue, prepare tracking state, and create a client for each target.
+        Initialize the Exporter: create and validate each target, build the
+        Prometheus metrics declared by the catalogue, and prepare tracking
+        state.
 
         Parameters:
             targets (Iterable[str]): Iterable of target addresses. Each target
@@ -82,13 +159,55 @@ class Exporter:
 
         self.registry = registry or REGISTRY
 
-        # metrics[version][metric_name] -> Gauge, built from the catalogue.
-        self.metrics = {}
-        self.metric_labelnames = {}
+        # Targets a scrape can be attempted against. Building one performs no
+        # I/O, so anything that raises below is a configuration error that
+        # retrying cannot fix, and that target is dropped rather than kept as a
+        # placeholder to retry.
+        self.targets: list[KeaTarget] = []
+        for target in targets:
+            try:
+                url = urlparse(target)
+                if url.scheme:
+                    self.targets.append(KeaHTTPClient(target, **kwargs))
+                elif url.path:
+                    self.targets.append(KeaSocketClient(target, **kwargs))
+                else:
+                    click.echo(f"Unable to parse target argument: {target}", err=True)
+            except Exception as ex:
+                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
+
+        seen_target_identities = set()
+        duplicate_target_identities = []
+        for target in self.targets:
+            if target.server_id in seen_target_identities and target.server_id not in duplicate_target_identities:
+                duplicate_target_identities.append(target.server_id)
+            seen_target_identities.add(target.server_id)
+        if duplicate_target_identities:
+            raise DuplicateTargetIdentityError(
+                "Target identity is configured more than once: " + ", ".join(duplicate_target_identities)
+            )
+
+        definitions = []
         for version in catalogue.CATALOGUE:
-            metrics, labelnames = self._build_metrics(version)
-            self.metrics[version] = metrics
-            self.metric_labelnames[version] = labelnames
+            prefix = catalogue.METRIC_PREFIX[version]
+            for metric, entries in catalogue.entries_by_metric(version).items():
+                definitions.append(
+                    _MetricDefinition(
+                        identity=_MetricIdentity(version, metric),
+                        prometheus_name=f"{prefix}_{metric}",
+                        documentation=catalogue.METRICS[version][metric],
+                        labelnames=catalogue.labelnames(entries),
+                    )
+                )
+        self._definitions = tuple(definitions)
+        self._definitions_by_identity = {definition.identity: definition for definition in self._definitions}
+        self._snapshots: Mapping[_Source, _SourceSnapshot] = {}
+        self._stale_timeout = stale_timeout
+        self._scrape_lock = threading.Lock()
+        self._last_scrape_completed_at: float | None = None
+        self._collector = _SnapshotCollector(self._definitions, lambda: self._snapshots)
+        self.registry.register(self._collector)
+
         # index[version][(statistic, scope)] -> Entry
         self.index = {version: catalogue.index(version) for version in catalogue.CATALOGUE}
         # Statistics known at some scope, for telling a mis-scoped reading from
@@ -103,46 +222,10 @@ class Exporter:
         # track missing info per (server_id, dhcp_version), to notify only once
         self.subnet_missing_info_sent = {}
 
-        self.lifecycle = LabelLifecycle(stale_timeout)
-
-        # Targets a scrape can be attempted against. Building one performs no
-        # I/O, so anything that raises below is a configuration error that
-        # retrying cannot fix, and that target is dropped rather than kept as a
-        # placeholder to retry.
-        self.targets: list[KeaTarget] = []
         # server_id of every target whose last scrape failed, so a target that
         # stays down is reported once rather than once per scrape.
         self._failing_targets: set[str] = set()
-        self._failing_sources: set[Source] = set()
-
-        for target in targets:
-            try:
-                url = urlparse(target)
-                if url.scheme:
-                    self.targets.append(KeaHTTPClient(target, **kwargs))
-                elif url.path:
-                    self.targets.append(KeaSocketClient(target, **kwargs))
-                else:
-                    click.echo(f"Unable to parse target argument: {target}", err=True)
-            except Exception as ex:
-                click.echo(f"Failed to initialize target {_safe_target(target)}: {type(ex).__name__}: {ex}", err=True)
-
-    def _build_metrics(self, version: DHCPVersion) -> tuple[dict, dict]:
-        """Create one Gauge per metric the catalogue declares for this daemon."""
-        prefix = catalogue.METRIC_PREFIX[version]
-        documentation = catalogue.METRICS[version]
-        metrics = {}
-        labelnames_by_metric = {}
-        for metric, entries in catalogue.entries_by_metric(version).items():
-            labelnames = catalogue.labelnames(entries)
-            metrics[metric] = Gauge(
-                f"{prefix}_{metric}",
-                documentation[metric],
-                labelnames,
-                registry=self.registry,
-            )
-            labelnames_by_metric[metric] = labelnames
-        return metrics, labelnames_by_metric
+        self._failing_sources: set[_Source] = set()
 
     def _report_target_failure(self, target: KeaTarget, ex: Exception) -> None:
         """Report a failing target once, not once per scrape while it stays down."""
@@ -170,7 +253,7 @@ class Exporter:
             err=True,
         )
 
-    def _report_source_recovery(self, source: Source) -> None:
+    def _report_source_recovery(self, source: _Source) -> None:
         """Close the report opened by _report_source_failure."""
         if source not in self._failing_sources:
             return
@@ -179,44 +262,71 @@ class Exporter:
         click.echo(f"Collecting {daemon.name} source from {server_id} again", err=True)
 
     def update(self) -> ScrapeReport:
-        """
-        Fetch statistics from all configured targets and update the metrics.
+        """Serialize and complete one unconditional Scrape cycle."""
+        with self._scrape_lock:
+            return self._complete_scrape_cycle_locked()
 
-        Successful source results publish only after all successful rows from
-        that target parse. After all targets finish, the label lifecycle
-        processes stale labels. Returns a summary of the completed scrape
-        cycle.
+    def update_if_due(self, interval: int) -> ScrapeReport | None:
+        """Complete one Scrape cycle if the interval in seconds has elapsed."""
+        with self._scrape_lock:
+            now = time.monotonic()
+            if self._last_scrape_completed_at is not None and now - self._last_scrape_completed_at < interval:
+                return None
+            return self._complete_scrape_cycle_locked()
+
+    def _complete_scrape_cycle_locked(self) -> ScrapeReport:
+        """
+        Fetch statistics and publish one completed state while locked.
+
+        Successful Source results publish only after all successful results
+        from that Target validate. Failed Sources keep their previous
+        snapshots. Returns a summary of the completed scrape cycle.
         """
         started_at = time.monotonic()
-        scraped: set[Source] = set()
+        scraped: set[_Source] = set()
         targets_reached = 0
         sources_total = 0
         statistics_received = 0
-        updated_label_combinations: set[tuple[int, tuple[str, ...]]] = set()
+        updated_label_combinations: set[tuple[_MetricIdentity, tuple[str, ...]]] = set()
+        stale_labels_removed = 0
+        next_snapshots = dict(self._snapshots)
 
         for target in self.targets:
             try:
-                # Materialise the generator before mutating any gauges.
+                # Materialize the generator before changing exported state.
                 source_results = list(target.stats())
                 targets_reached += 1
                 sources_total += len(source_results)
-                completed_sources: set[Source] = set()
+                completed_sources: set[_Source] = set()
                 failed_sources = []
                 target_statistics = 0
-                pending_updates = []
+                pending_snapshots = {}
                 for result in source_results:
                     if isinstance(result, SourceFailure):
                         failed_sources.append(result)
                         continue
                     server_id, dhcp_version, arguments, subnets = result
                     target_statistics += len(arguments)
-                    pending_updates.extend(self._parse_metric_updates(server_id, dhcp_version, arguments, subnets))
-                    completed_sources.add((server_id, dhcp_version))
-                target_label_combinations: set[tuple[int, tuple[str, ...]]] = set()
-                for metric, labelnames, source, labels, value in pending_updates:
-                    label_values = self._set_metric(metric, labelnames, labels, value)
-                    self.lifecycle.record(metric, source, label_values)
-                    target_label_combinations.add((id(metric), label_values))
+                    source = (server_id, dhcp_version)
+                    pending_snapshots[source] = self._normalize_samples(
+                        server_id,
+                        dhcp_version,
+                        arguments,
+                        subnets,
+                    )
+                    completed_sources.add(source)
+
+                collected_at = time.monotonic()
+                target_label_combinations = set()
+                for source, samples in pending_snapshots.items():
+                    previous = next_snapshots.get(source)
+                    if previous is not None:
+                        old_labels = {(sample.metric, sample.label_values) for sample in previous.samples}
+                        new_labels = {(sample.metric, sample.label_values) for sample in samples}
+                        stale_labels_removed += len(old_labels.difference(new_labels))
+                    next_snapshots[source] = _SourceSnapshot(samples, collected_at)
+                    target_label_combinations.update((sample.metric, sample.label_values) for sample in samples)
+
                 scraped.update(completed_sources)
                 statistics_received += target_statistics
                 updated_label_combinations.update(target_label_combinations)
@@ -228,8 +338,14 @@ class Exporter:
             except Exception as ex:
                 self._report_target_failure(target, ex)
 
-        stale_labels_removed = self.lifecycle.end_cycle(scraped, time.monotonic())
-        return ScrapeReport(
+        next_snapshots, expired_labels_removed = self._expire_snapshots(
+            next_snapshots,
+            scraped,
+            time.monotonic(),
+        )
+        stale_labels_removed += expired_labels_removed
+        self._snapshots = next_snapshots
+        report = ScrapeReport(
             targets_total=len(self.targets),
             targets_reached=targets_reached,
             sources_total=sources_total,
@@ -239,6 +355,28 @@ class Exporter:
             stale_labels_removed=stale_labels_removed,
             elapsed_seconds=time.monotonic() - started_at,
         )
+        self._last_scrape_completed_at = time.monotonic()
+        return report
+
+    def _expire_snapshots(
+        self,
+        snapshots: Mapping[_Source, _SourceSnapshot],
+        scraped: set[_Source],
+        now: float,
+    ) -> tuple[Mapping[_Source, _SourceSnapshot], int]:
+        """Remove failed Source snapshots after the configured timeout."""
+        if self._stale_timeout == 0:
+            return snapshots, 0
+        expired = {
+            source
+            for source, snapshot in snapshots.items()
+            if source not in scraped and now - snapshot.collected_at > self._stale_timeout
+        }
+        if not expired:
+            return snapshots, 0
+        removed = sum(len(snapshots[source].samples) for source in expired)
+        retained = {source: snapshot for source, snapshot in snapshots.items() if source not in expired}
+        return retained, removed
 
     def _resolve_selector(self, key, server_id, dhcp_version, subnets):
         """Split a statistic name into its scope, its bare name, and its labels.
@@ -310,43 +448,20 @@ class Exporter:
             err=True,
         )
 
-    def _set_metric(self, metric, labelnames, labels, value):
-        """Set the value, filling any label the reading did not supply.
-
-        A reading shallower than the metric's deepest scope leaves the deeper
-        labels empty, so a subnet total and a pool total stay distinct series.
-        """
-        filtered = {name: str(labels.get(name, "")) for name in labelnames}
-        metric.labels(**filtered).set(value)
-        return tuple(filtered[name] for name in labelnames)
-
     def _report_unhandled(self, key, message):
         """Report an unhandled statistic once."""
         if key not in self.unhandled_statistics:
             click.echo(message, err=True)
             self.unhandled_statistics.add(key)
 
-    def parse_metrics(self, server, dhcp_version, arguments, subnets):
-        """Parse and export metrics without recording lifecycle labels.
-
-        New label combinations are not eligible for lifecycle pruning. A label
-        combination already tracked by update remains eligible for pruning.
-        Use update for a complete scrape cycle.
-        """
-        for metric, labelnames, _source, labels, value in self._parse_metric_updates(
-            server, dhcp_version, arguments, subnets
-        ):
-            self._set_metric(metric, labelnames, labels, value)
-
-    def _parse_metric_updates(self, server, dhcp_version, arguments, subnets):
-        """Parse Kea statistics without publishing them."""
+    def _normalize_samples(self, server, dhcp_version, arguments, subnets) -> tuple[_MetricSample, ...]:
+        """Validate one successful Source result and return its complete state."""
         index = self.index.get(dhcp_version)
         if index is None:
-            return []
-        metrics = self.metrics[dhcp_version]
+            return ()
         never_export = catalogue.NEVER_EXPORT[dhcp_version]
         known = self.known[dhcp_version]
-        updates = []
+        samples = {}
 
         for key, data in arguments.items():
             if not isinstance(data, list) or not data:
@@ -389,17 +504,17 @@ class Exporter:
                 self._report_unhandled(key, f"Unhandled statistic '{key}' please file an issue at {ISSUE_URL}")
                 continue
 
-            updates.append(
-                (
-                    metrics[entry.metric],
-                    self.metric_labelnames[dhcp_version][entry.metric],
-                    (server, dhcp_version),
-                    {"server": server, **labels, **entry.labels},
-                    value,
-                )
+            identity = _MetricIdentity(dhcp_version, entry.metric)
+            definition = self._definitions_by_identity[identity]
+            all_labels = {"server": server, **labels, **entry.labels}
+            label_values = tuple(str(all_labels.get(name, "")) for name in definition.labelnames)
+            samples[(identity, label_values)] = _MetricSample(
+                metric=identity,
+                label_values=label_values,
+                value=value,
             )
 
-        return updates
+        return tuple(samples.values())
 
 
 def _pd_pool_name(pool: dict) -> str:
