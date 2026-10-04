@@ -11,7 +11,7 @@ repos:
   # Keep in step with the pinned ruff in [dependency-groups].dev, so the local
   # gate and CI cannot disagree.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.0
+    rev: v0.16.8
     hooks:
       - id: ruff
         args: [--fix]
@@ -29,6 +29,6 @@ repos:
 
   # Keep in step with the pinned zizmor in [dependency-groups].dev.
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: v1.29.0
+    rev: v1.30.1
     hooks:
       - id: zizmor

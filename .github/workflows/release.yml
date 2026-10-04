@@ -60,7 +60,7 @@ jobs:
     name: Publish to PyPI
     needs: semantic-release
     if: needs.semantic-release.outputs.released == 'true'
-    uses: ./.github/workflows/pypi.yml
+    uses: $/.github/workflows/pypi.yml
     with:
       tag: ${{ needs.semantic-release.outputs.tag }}
     permissions:
@@ -71,7 +71,7 @@ jobs:
     name: Publish Docker images
     needs: semantic-release
     if: needs.semantic-release.outputs.released == 'true'
-    uses: ./.github/workflows/docker.yml
+    uses: $/.github/workflows/docker.yml
     with:
       tag: ${{ needs.semantic-release.outputs.tag }}
     permissions:
