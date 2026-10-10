@@ -1,5 +1,27 @@
 
 
+0.11.0
+
+
+
+ - reject out-of-range port and interval values
+
+ - validate Target identities before registry mutation
+
+
+
+
+
+ - serve completed concurrent Scrape cycles
+
+ - reject duplicate Target identities
+
+
+
+
+
+
+
 0.10.0
 
 
