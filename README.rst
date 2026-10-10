@@ -259,9 +259,10 @@ All other options are optional.
 
 	Options:
 	  -a, --address TEXT             Address to listen on.  [default: 0.0.0.0]
-	  -p, --port INTEGER             Port to listen on.  [default: 9547]
-	  -i, --interval INTEGER         Minimum interval between scrape cycles, in
-	                                 seconds.  [default: 0]
+	  -p, --port INTEGER RANGE       Port to listen on.  [default: 9547;
+	                                 1<=x<=65535]
+	  -i, --interval INTEGER RANGE   Minimum interval between scrape cycles, in
+	                                 seconds.  [default: 0; x>=0]
 	  -v, --verbose                  Write one summary to stderr after each scrape
 	                                 cycle.
 	  --client-cert PATH             Path to the client certificate for HTTP

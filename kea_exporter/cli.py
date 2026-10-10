@@ -23,7 +23,7 @@ from kea_exporter.exporter import DuplicateTargetIdentityError, Exporter
     "-p",
     "--port",
     envvar="PORT",
-    type=int,
+    type=click.IntRange(min=1, max=65535),
     default=9547,
     help="Port to listen on.",
 )
@@ -31,7 +31,7 @@ from kea_exporter.exporter import DuplicateTargetIdentityError, Exporter
     "-i",
     "--interval",
     envvar="INTERVAL",
-    type=int,
+    type=click.IntRange(min=0),
     default=0,
     help="Minimum interval between scrape cycles, in seconds.",
 )

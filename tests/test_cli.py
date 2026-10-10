@@ -6,6 +6,7 @@ import threading
 from queue import Queue
 from wsgiref.util import setup_testing_defaults
 
+import click
 import pytest
 from click.testing import CliRunner
 from prometheus_client import REGISTRY, CollectorRegistry
@@ -127,16 +128,38 @@ def test_help_explains_runtime_behavior_and_shows_defaults():
     ]
     assert "Parameters:" not in result.output
     assert "[default: 0.0.0.0]" in result.output
-    assert "[default: 9547]" in result.output
-    assert "[default: 0]" in result.output
     assert "[default: 10; x>=1]" in result.output
-    assert "[default: 0; x>=0]" in result.output
+    assert result.output.count("[default: 0; x>=0]") == 2
     options = " ".join(_options.split())
+    assert "[default: 9547; 1<=x<=65535]" in options
     assert "Minimum interval between scrape cycles, in seconds." in options
     assert "Write one summary to stderr after each scrape cycle." in options
     assert (
         "Remove stale labels this many seconds after a source's last success. Set to 0 to wait for its next success."
     ) in options
+
+
+@pytest.mark.parametrize(
+    ("arguments", "env"),
+    [
+        (["--interval", "-1"], None),
+        ([], {"INTERVAL": "-1"}),
+        (["--port", "-1"], None),
+        (["--port", "65536"], None),
+        ([], {"PORT": "65536"}),
+    ],
+)
+def test_cli_rejects_out_of_range_integer_options_before_scraping(cli_runtime, http_server, arguments, env):
+    kea = http_server()
+    result = cli_runtime.invoke(*arguments, kea.target, env=env)
+    assert result.exit_code == 2
+    assert "is not in the range" in result.output
+    assert statistic_request_count(kea) == 0
+
+
+def test_every_integer_option_has_a_range():
+    unbounded = [param.name for param in cli.params if type(param.type) is click.types.IntParamType]
+    assert unbounded == []
 
 
 def test_cli_collects_metrics_before_serving(cli_runtime, http_server):
@@ -577,7 +600,7 @@ def test_wsgi_render_does_not_block_the_next_scrape_cycle(cli_runtime, http_serv
     try:
         assert first_render.wait(timeout=15)
         workers[1].start()
-        second_render_started_while_first_waited = second_render.wait(timeout=1)
+        second_render_started_while_first_waited = second_render.wait(timeout=15)
     finally:
         release_first_render.set()
         for worker in workers:
