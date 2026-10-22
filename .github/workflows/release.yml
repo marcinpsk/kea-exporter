@@ -37,16 +37,6 @@ jobs:
       - name: Force release branch to workflow SHA
         run: git reset --hard ${{ github.sha }}
 
-      - name: Debug git state
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "=== Tags ==="
-          git tag -l
-          echo "=== Branch ==="
-          git branch -v
-          echo "=== Last 12 commits ==="
-          git log --oneline -12
-
       - name: Run semantic-release
         id: release
         uses: python-semantic-release/python-semantic-release@b700dbeb1f431a0fcc30a79f3f0869407fe07278  # v10.7.0
