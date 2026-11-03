@@ -26,7 +26,7 @@ def docker(*arguments):
 
 
 def check_image_installation(image):
-    """Inspect the installed packages with the container's normal user permissions."""
+    """Inspect recorded package paths and ancestors as the container's normal user."""
     report = json.loads(
         docker(
             "run",
@@ -41,6 +41,13 @@ import json
 import os
 import shutil
 
+installed_paths = set()
+for distribution in importlib.metadata.distributions():
+    for file in distribution.files or []:
+        path = file.locate().resolve()
+        installed_paths.add(path)
+        installed_paths.update(path.parents)
+
 project = importlib.metadata.distribution('kea-exporter')
 print(json.dumps({
     'uid': os.getuid(),
@@ -52,10 +59,7 @@ print(json.dumps({
     'uv': shutil.which('uv'),
     'uvx': shutil.which('uvx'),
     'writable': os.access(project.locate_file(''), os.W_OK),
-    'writable_files': [
-        str(file) for dist in importlib.metadata.distributions() for file in (dist.files or [])
-        if os.access(file.locate(), os.W_OK)
-    ],
+    'writable_paths': [str(path) for path in sorted(installed_paths) if os.access(path, os.W_OK)],
     'license': project.read_text('licenses/LICENSE'),
 }))
 """,
@@ -64,7 +68,7 @@ print(json.dumps({
     assert report["uid"] != 0
     assert not report["editable"]
     assert not report["writable"]
-    assert not report["writable_files"], f"writable package files: {report['writable_files']}"
+    assert not report["writable_paths"], f"writable package paths: {report['writable_paths']}"
     assert report["uv"] is None
     assert report["uvx"] is None
     assert report["license"] == (ROOT / "LICENSE").read_text()
@@ -87,17 +91,24 @@ def test_image_installs_only_locked_runtime_packages():
     check_image_installation(IMAGE)
 
 
-def test_image_check_rejects_a_writable_module_in_a_read_only_directory(tmp_path):
+@pytest.mark.parametrize("target,mode", [("module", 0o666), ("package", 0o777), ("ancestor", 0o777)])
+def test_image_check_rejects_writable_package_paths(tmp_path, target, mode):
+    paths = {
+        "module": "Path(kea_exporter.__file__)",
+        "package": "Path(kea_exporter.__file__).parent",
+        "ancestor": "Path(sys.prefix) / 'lib'",
+    }
     image = f"kea-exporter-permissions-{uuid4().hex}:test"
     (tmp_path / "Dockerfile").write_text(
         f"FROM {IMAGE}\n"
         "USER root\n"
-        'RUN python -c "import os; import kea_exporter; os.chmod(kea_exporter.__file__, 0o666)"\n'
+        'RUN python -c "import os; import sys; from pathlib import Path; import kea_exporter; '
+        f'os.chmod({paths[target]}, {mode})"\n'
         "USER kea-exporter:kea-exporter\n"
     )
     docker("build", "--tag", image, str(tmp_path))
     try:
-        with pytest.raises(AssertionError, match="writable package files"):
+        with pytest.raises(AssertionError, match="writable package paths"):
             check_image_installation(image)
     finally:
         docker("image", "rm", image)
