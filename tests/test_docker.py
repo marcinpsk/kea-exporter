@@ -91,27 +91,51 @@ def test_image_installs_only_locked_runtime_packages():
     check_image_installation(IMAGE)
 
 
-@pytest.mark.parametrize("target,mode", [("module", 0o666), ("package", 0o777), ("ancestor", 0o777)])
-def test_image_check_rejects_writable_package_paths(tmp_path, target, mode):
+@pytest.fixture
+def permission_images(tmp_path):
+    """Build derivative images and remove only this test's image references."""
     paths = {
         "module": "Path(kea_exporter.__file__)",
         "package": "Path(kea_exporter.__file__).parent",
         "ancestor": "Path(sys.prefix) / 'lib'",
     }
-    image = f"kea-exporter-permissions-{uuid4().hex}:test"
-    (tmp_path / "Dockerfile").write_text(
-        f"FROM {IMAGE}\n"
-        "USER root\n"
-        'RUN python -c "import os; import sys; from pathlib import Path; import kea_exporter; '
-        f'os.chmod({paths[target]}, {mode})"\n'
-        "USER kea-exporter:kea-exporter\n"
-    )
-    docker("build", "--tag", image, str(tmp_path))
+    images = []
+
+    def build(target, mode):
+        image = f"kea-exporter-permissions-{uuid4().hex}:test"
+        directory = tmp_path / f"image-{len(images)}"
+        directory.mkdir()
+        (directory / "Dockerfile").write_text(
+            f"FROM {IMAGE}\n"
+            "USER root\n"
+            'RUN python -c "import os; import sys; from pathlib import Path; import kea_exporter; '
+            f'os.chmod({paths[target]}, {mode})"\n'
+            "USER kea-exporter:kea-exporter\n"
+            f"LABEL test-image={image}\n"
+        )
+        docker("build", "--tag", image, str(directory))
+        images.append(image)
+        return image
+
     try:
-        with pytest.raises(AssertionError, match="writable package paths"):
-            check_image_installation(image)
+        yield build
     finally:
-        docker("image", "rm", image)
+        for image in reversed(images):
+            docker("image", "rm", image)
+
+
+def test_derivative_image_ids_are_isolated(permission_images):
+    first = permission_images("module", 0o666)
+    second = permission_images("module", 0o666)
+    ids = docker("image", "inspect", "--format", "{{.Id}}", first, second).splitlines()
+    assert ids[0] != ids[1], "One test must not delete an image ID that another test is running"
+
+
+@pytest.mark.parametrize("target,mode", [("module", 0o666), ("package", 0o777), ("ancestor", 0o777)])
+def test_image_check_rejects_writable_package_paths(permission_images, target, mode):
+    image = permission_images(target, mode)
+    with pytest.raises(AssertionError, match="writable package paths"):
+        check_image_installation(image)
 
 
 def test_image_entrypoint_exposes_cli_help():
