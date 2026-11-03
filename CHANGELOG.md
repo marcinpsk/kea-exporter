@@ -1,5 +1,17 @@
 
 
+0.12.0
+
+
+
+ - require Python 3.12 or newer
+
+
+
+
+
+
+
 0.11.1
 
 
