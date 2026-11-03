@@ -19,10 +19,17 @@ env:
 
 jobs:
   build-and-push-image:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         distro: [alpine, debian]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
@@ -42,6 +49,90 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract image labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: type=raw,value=${{ inputs.tag || github.sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: '3.14'
+
+      - name: Build ${{ matrix.distro }} ${{ matrix.arch }} image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.distro }}
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          # Upload untagged release images. Publish tags only after all image checks pass.
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=${{ inputs.tag != '' }}
+          cache-from: type=gha,scope=docker-${{ matrix.distro }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.distro }}-${{ matrix.arch }}
+
+      - name: Test ${{ matrix.distro }} ${{ matrix.arch }} image
+        env:
+          KEA_EXPORTER_TEST_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          KEA_EXPORTER_TEST_PLATFORM: linux/${{ matrix.arch }}
+        run: uv run --frozen -- pytest -q tests/test_docker.py
+
+      - name: Export the tested image digest
+        id: digest
+        if: inputs.tag != ''
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digests/$ARCH"
+
+      - name: Upload the tested image digest
+        if: inputs.tag != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: digests-${{ matrix.distro }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifests:
+    needs: build-and-push-image
+    if: ${{ inputs.tag != '' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        distro: [alpine, debian]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download tested image digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: digests-${{ matrix.distro }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
@@ -54,62 +145,18 @@ jobs:
             type=raw,value=latest-${{ matrix.distro }},enable=${{ inputs.tag != '' }}
             type=raw,value=latest,enable=${{ inputs.tag != '' && matrix.distro == 'debian' }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
-        with:
-          platforms: linux/amd64,linux/arm64
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-        with:
-          platforms: linux/amd64,linux/arm64
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          python-version: '3.14'
-
-      - name: Build ${{ matrix.distro }} smoke-test image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          file: Dockerfile.${{ matrix.distro }}
-          platforms: linux/amd64
-          load: true
-          tags: kea-exporter-smoke:${{ matrix.distro }}
-          cache-from: type=gha,scope=docker-${{ matrix.distro }}
-
-      - name: Test ${{ matrix.distro }} image
+      - name: Publish the multi-platform image
         env:
-          KEA_EXPORTER_TEST_IMAGE: kea-exporter-smoke:${{ matrix.distro }}
-          KEA_EXPORTER_TEST_PLATFORM: linux/amd64
-        run: uv run --frozen -- pytest -q tests/test_docker.py
-
-      - name: Build ${{ matrix.distro }} arm64 smoke-test image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          file: Dockerfile.${{ matrix.distro }}
-          platforms: linux/arm64
-          load: true
-          tags: kea-exporter-smoke:${{ matrix.distro }}-arm64
-          cache-from: type=gha,scope=docker-${{ matrix.distro }}
-
-      - name: Test ${{ matrix.distro }} arm64 image
-        env:
-          KEA_EXPORTER_TEST_IMAGE: kea-exporter-smoke:${{ matrix.distro }}-arm64
-          KEA_EXPORTER_TEST_PLATFORM: linux/arm64
-        run: uv run --frozen -- pytest -q tests/test_docker.py
-
-      - name: Build ${{ matrix.distro }} image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          file: Dockerfile.${{ matrix.distro }}
-          platforms: linux/amd64,linux/arm64
-          push: ${{ inputs.tag != '' }}
-          provenance: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=docker-${{ matrix.distro }}
-          cache-to: type=gha,mode=max,scope=docker-${{ matrix.distro }}
+          DIGEST_DIR: ${{ runner.temp }}/digests
+        run: |
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          arguments=()
+          for tag in "${tags[@]}"; do
+            arguments+=(--tag "$tag")
+          done
+          for arch in amd64 arm64; do
+            read -r digest < "$DIGEST_DIR/$arch"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            arguments+=("$REGISTRY/$IMAGE_NAME@$digest")
+          done
+          docker buildx imagetools create "${arguments[@]}"

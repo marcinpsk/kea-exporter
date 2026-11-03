@@ -57,6 +57,15 @@ docker build -f Dockerfile.debian -t kea-exporter-smoke:debian .
 KEA_EXPORTER_TEST_IMAGE=kea-exporter-smoke:debian uv run -- pytest tests/test_docker.py
 ```
 
+CI builds and tests each image on a standard native GitHub runner: `ubuntu-24.04`
+for amd64 and `ubuntu-24.04-arm` for ARM64. Release tags combine the two image
+digests only after all image tests pass.
+
+Set `KEA_EXPORTER_TEST_REGISTRY` to a local test registry to run the publishing
+integration test in `tests/test_ci.py`. The selected Buildx builder must reach
+that registry. This test uploads temporary images and checks the release
+manifest with real Docker commands.
+
 ## New Features Tested
 
 The tests extensively cover the new features introduced in this branch:
