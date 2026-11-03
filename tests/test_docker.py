@@ -14,22 +14,26 @@ import requests
 from prometheus_client.parser import text_string_to_metric_families
 
 IMAGE = os.environ.get("KEA_EXPORTER_TEST_IMAGE")
+PLATFORM = os.environ.get("KEA_EXPORTER_TEST_PLATFORM")
 pytestmark = pytest.mark.skipif(not IMAGE, reason="Set KEA_EXPORTER_TEST_IMAGE to test a built Docker image")
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def docker(*arguments):
+    if arguments[0] in {"run", "build"} and PLATFORM:
+        arguments = (arguments[0], "--platform", PLATFORM, *arguments[1:])
     return subprocess.run(["docker", *arguments], check=True, capture_output=True, text=True, timeout=30).stdout
 
 
-def test_image_installs_only_locked_runtime_packages():
+def check_image_installation(image):
+    """Inspect the installed packages with the container's normal user permissions."""
     report = json.loads(
         docker(
             "run",
             "--rm",
             "--entrypoint",
             "python",
-            IMAGE,
+            image,
             "-c",
             """
 import importlib.metadata
@@ -48,6 +52,10 @@ print(json.dumps({
     'uv': shutil.which('uv'),
     'uvx': shutil.which('uvx'),
     'writable': os.access(project.locate_file(''), os.W_OK),
+    'writable_files': [
+        str(file) for dist in importlib.metadata.distributions() for file in (dist.files or [])
+        if os.access(file.locate(), os.W_OK)
+    ],
     'license': project.read_text('licenses/LICENSE'),
 }))
 """,
@@ -56,6 +64,7 @@ print(json.dumps({
     assert report["uid"] != 0
     assert not report["editable"]
     assert not report["writable"]
+    assert not report["writable_files"], f"writable package files: {report['writable_files']}"
     assert report["uv"] is None
     assert report["uvx"] is None
     assert report["license"] == (ROOT / "LICENSE").read_text()
@@ -72,6 +81,26 @@ print(json.dumps({
         expected[name] = package["version"]
         pending.extend(dependency["name"] for dependency in package.get("dependencies", []))
     assert report["versions"] == expected
+
+
+def test_image_installs_only_locked_runtime_packages():
+    check_image_installation(IMAGE)
+
+
+def test_image_check_rejects_a_writable_module_in_a_read_only_directory(tmp_path):
+    image = f"kea-exporter-permissions-{uuid4().hex}:test"
+    (tmp_path / "Dockerfile").write_text(
+        f"FROM {IMAGE}\n"
+        "USER root\n"
+        'RUN python -c "import os; import kea_exporter; os.chmod(kea_exporter.__file__, 0o666)"\n'
+        "USER kea-exporter:kea-exporter\n"
+    )
+    docker("build", "--tag", image, str(tmp_path))
+    try:
+        with pytest.raises(AssertionError, match="writable package files"):
+            check_image_installation(image)
+    finally:
+        docker("image", "rm", image)
 
 
 def test_image_entrypoint_exposes_cli_help():

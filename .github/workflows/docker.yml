@@ -82,6 +82,23 @@ jobs:
       - name: Test ${{ matrix.distro }} image
         env:
           KEA_EXPORTER_TEST_IMAGE: kea-exporter-smoke:${{ matrix.distro }}
+          KEA_EXPORTER_TEST_PLATFORM: linux/amd64
+        run: uv run --frozen -- pytest -q tests/test_docker.py
+
+      - name: Build ${{ matrix.distro }} arm64 smoke-test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.distro }}
+          platforms: linux/arm64
+          load: true
+          tags: kea-exporter-smoke:${{ matrix.distro }}-arm64
+          cache-from: type=gha,scope=docker-${{ matrix.distro }}
+
+      - name: Test ${{ matrix.distro }} arm64 image
+        env:
+          KEA_EXPORTER_TEST_IMAGE: kea-exporter-smoke:${{ matrix.distro }}-arm64
+          KEA_EXPORTER_TEST_PLATFORM: linux/arm64
         run: uv run --frozen -- pytest -q tests/test_docker.py
 
       - name: Build ${{ matrix.distro }} image
