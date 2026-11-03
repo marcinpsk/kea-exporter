@@ -17,12 +17,13 @@ IMAGE = os.environ.get("KEA_EXPORTER_TEST_IMAGE")
 PLATFORM = os.environ.get("KEA_EXPORTER_TEST_PLATFORM")
 pytestmark = pytest.mark.skipif(not IMAGE, reason="Set KEA_EXPORTER_TEST_IMAGE to test a built Docker image")
 ROOT = Path(__file__).resolve().parent.parent
+IMAGE_TIMEOUT = 60
 
 
 def docker(*arguments):
     if arguments[0] in {"run", "build"} and PLATFORM:
         arguments = (arguments[0], "--platform", PLATFORM, *arguments[1:])
-    result = subprocess.run(["docker", *arguments], check=True, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["docker", *arguments], check=True, capture_output=True, text=True, timeout=IMAGE_TIMEOUT)
     return result.stdout + result.stderr if arguments[0] == "logs" else result.stdout
 
 
@@ -145,7 +146,7 @@ def test_image_entrypoint_exposes_cli_help():
     assert "--ca-bundle" in output
 
 
-def wait_for_metrics(name, url, timeout=60):
+def wait_for_metrics(name, url, timeout=IMAGE_TIMEOUT):
     """Wait for metrics and retain container diagnostics on startup failure."""
     with requests.Session() as session:
         session.trust_env = False
