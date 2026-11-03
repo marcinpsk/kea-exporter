@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 def docker(*arguments):
     if arguments[0] in {"run", "build"} and PLATFORM:
         arguments = (arguments[0], "--platform", PLATFORM, *arguments[1:])
-    return subprocess.run(["docker", *arguments], check=True, capture_output=True, text=True, timeout=30).stdout
+    result = subprocess.run(["docker", *arguments], check=True, capture_output=True, text=True, timeout=30)
+    return result.stdout + result.stderr if arguments[0] == "logs" else result.stdout
 
 
 def check_image_installation(image):
@@ -144,6 +145,40 @@ def test_image_entrypoint_exposes_cli_help():
     assert "--ca-bundle" in output
 
 
+def wait_for_metrics(name, url, timeout=60):
+    """Wait for metrics and retain container diagnostics on startup failure."""
+    with requests.Session() as session:
+        session.trust_env = False
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                response = session.get(url, timeout=1)
+                response.raise_for_status()
+                return response
+            except (requests.ConnectionError, requests.Timeout):
+                state = json.loads(docker("inspect", "--format", "{{json .State}}", name))
+                if not state["Running"]:
+                    pytest.fail(f"Container exited with code {state['ExitCode']}:\n{docker('logs', name)}")
+                if time.monotonic() >= deadline:
+                    pytest.fail(f"Metrics were not ready within {timeout} seconds:\n{docker('logs', name)}")
+                time.sleep(0.1)
+
+
+def test_image_startup_failure_reports_container_stderr(http_server):
+    kea = http_server()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    name = f"kea-exporter-test-{uuid4().hex}"
+    docker("run", "--detach", "--name", name, IMAGE, "--port", "0", kea.target)
+    try:
+        with pytest.raises(pytest.fail.Exception, match="Container exited with code 2") as failure:
+            wait_for_metrics(name, f"http://127.0.0.1:{port}/metrics")
+        assert "Invalid value" in str(failure.value)
+    finally:
+        docker("rm", "--force", name)
+
+
 def test_image_serves_kea_metrics_with_a_read_only_filesystem(http_server):
     kea = http_server()
     with socket.socket() as listener:
@@ -166,18 +201,7 @@ def test_image_serves_kea_metrics_with_a_read_only_filesystem(http_server):
         kea.target,
     )
     try:
-        with requests.Session() as session:
-            session.trust_env = False
-            deadline = time.monotonic() + 15
-            while True:
-                try:
-                    response = session.get(f"http://127.0.0.1:{port}/metrics", timeout=1)
-                    response.raise_for_status()
-                    break
-                except requests.ConnectionError:
-                    if time.monotonic() >= deadline:
-                        pytest.fail(docker("logs", name))
-                    time.sleep(0.1)
+        response = wait_for_metrics(name, f"http://127.0.0.1:{port}/metrics")
         samples = [sample for family in text_string_to_metric_families(response.text) for sample in family.samples]
         assert any(
             sample.name == "kea_dhcp4_packets_sent_total"
