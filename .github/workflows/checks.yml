@@ -63,6 +63,17 @@ jobs:
       - name: Run tests
         run: uv run pytest -v
 
+  test-result:
+    name: Run tests
+    needs: test
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all Python test results
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
+
   coverage:
     name: Test Coverage
     runs-on: ubuntu-latest
