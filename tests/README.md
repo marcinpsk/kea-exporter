@@ -46,6 +46,17 @@ uv run pytest -v
 uv run pytest --cov --cov-report=term-missing --cov-fail-under=80
 ```
 
+### Test a Docker image
+
+The Docker smoke tests require a Linux Docker host. They check the installed
+packages, CLI, and a real Kea-to-Prometheus scrape with a read-only filesystem.
+CI runs these tests for both images before publication.
+
+```bash
+docker build -f Dockerfile.debian -t kea-exporter-smoke:debian .
+KEA_EXPORTER_TEST_IMAGE=kea-exporter-smoke:debian uv run --system-certs -- pytest tests/test_docker.py
+```
+
 ## New Features Tested
 
 The tests extensively cover the new features introduced in this branch:

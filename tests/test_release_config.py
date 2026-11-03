@@ -18,6 +18,21 @@ USER_FACING = set(PARSER["minor_tags"]) | set(PARSER["patch_tags"])
 EXCLUDED = [re.compile(pattern) for pattern in RELEASE["changelog"]["exclude_commit_patterns"]]
 
 
+def test_release_refreshes_and_commits_the_lockfile():
+    commands = [command.strip() for command in RELEASE["build_command"].split("&&")]
+    lock_step = next((index for index, command in enumerate(commands) if command.startswith("uv lock")), None)
+    build_step = next(index for index, command in enumerate(commands) if command.startswith("uv build"))
+    assert lock_step is not None and lock_step < build_step, "Refresh the lockfile after the release version changes"
+    assert "uv.lock" in RELEASE.get("assets", []), "Commit the refreshed lockfile with the release version"
+
+
+def test_project_version_matches_the_lockfile():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    lock = tomllib.loads((ROOT / "uv.lock").read_text())
+    locked_project = next(package for package in lock["package"] if package["name"] == project["name"])
+    assert locked_project["version"] == project["version"]
+
+
 @pytest.mark.parametrize("tag", PARSER["allowed_tags"])
 @pytest.mark.parametrize("subject", ["{tag}: a change", "{tag}(scope): a change"])
 def test_every_commit_type_is_either_released_or_excluded(tag, subject):

@@ -64,6 +64,26 @@ jobs:
         with:
           platforms: linux/amd64,linux/arm64
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: '3.14'
+
+      - name: Build ${{ matrix.distro }} smoke-test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.distro }}
+          platforms: linux/amd64
+          load: true
+          tags: kea-exporter-smoke:${{ matrix.distro }}
+          cache-from: type=gha,scope=docker-${{ matrix.distro }}
+
+      - name: Test ${{ matrix.distro }} image
+        env:
+          KEA_EXPORTER_TEST_IMAGE: kea-exporter-smoke:${{ matrix.distro }}
+        run: uv run --system-certs --frozen -- pytest -q tests/test_docker.py
+
       - name: Build ${{ matrix.distro }} image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -74,3 +94,5 @@ jobs:
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=docker-${{ matrix.distro }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.distro }}
