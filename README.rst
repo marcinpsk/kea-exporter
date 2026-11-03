@@ -76,6 +76,8 @@ Or with explicit arguments:
 From Git Repository
 ////////////////////
 
+Requires Python 3.12 or newer.
+
 ::
 
     $ pip install git+https://github.com/marcinpsk/kea-exporter.git

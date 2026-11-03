@@ -13,7 +13,7 @@ authors = [
     { name = "Marcin Zieba", email = "marcinpsk@gmail.com" },
 ]
 license = { text = "MIT" }
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.12,<4.0"
 dependencies = [
     "click>=8.1.7,<9.0",
     "prometheus-client>=0.22.0,<1.0",
@@ -30,9 +30,10 @@ keywords = [
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: System :: Monitoring",
     "Topic :: System :: Systems Administration",
 ]
@@ -49,8 +50,7 @@ kea-exporter = "kea_exporter.__main__:cli"
 [tool.ruff]
 line-length = 120
 indent-width = 4
-# Assume Python 3.10
-target-version = 'py310'
+target-version = 'py312'
 
 [tool.ruff.lint]
 # Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`) codes by default.
@@ -85,8 +85,6 @@ dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "zizmor==1.30.1",
-    # tomllib is stdlib from 3.11; CI runs 3.10, where the release-config test needs this.
-    "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [tool.pytest.ini_options]

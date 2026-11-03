@@ -5,14 +5,10 @@ commit type that is not user-facing has to be excluded once, in pyproject.
 """
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["semantic_release"]
