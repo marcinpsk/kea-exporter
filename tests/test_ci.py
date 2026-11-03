@@ -1,5 +1,6 @@
 """Exercise the lint tools against workflows and dependency files."""
 
+import csv
 import json
 import os
 import re
@@ -41,9 +42,7 @@ def test_docker_python_matches_project_support_and_smoke_tests(dockerfile):
     assert setup_uv["with"]["python-version"] == versions[0]
 
 
-@pytest.mark.parametrize("arch, runner", [("amd64", "ubuntu-24.04"), ("arm64", "ubuntu-24.04-arm")])
-def test_each_image_platform_is_built_and_smoke_tested_on_a_native_runner(arch, runner):
-    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+def check_native_image_workflow(workflow, arch, runner):
     job = workflow["jobs"]["build-and-push-image"]
     matrix = job["strategy"]["matrix"]
     assert matrix["arch"] == ["amd64", "arm64"]
@@ -62,21 +61,26 @@ def test_each_image_platform_is_built_and_smoke_tested_on_a_native_runner(arch, 
     assert build["load"] is True
     assert "${{ matrix.arch }}" in build["cache-to"]
     test_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("env", {}).get("KEA_EXPORTER_TEST_IMAGE") == build["tags"]
-        and "tests/test_docker.py" in step.get("run", "")
+        index for index, step in enumerate(steps) if step.get("env", {}).get("KEA_EXPORTER_TEST_IMAGE") == build["tags"]
     )
+    assert steps[test_index]["run"].strip() == "uv run --frozen -- pytest -q tests/test_docker.py"
     assert steps[test_index]["env"]["KEA_EXPORTER_TEST_PLATFORM"] == build["platforms"]
     digest_index = next(index for index, step in enumerate(steps) if step.get("id") == "digest")
+    assert steps[digest_index]["env"]["DIGEST"] == "${{ steps.build.outputs.digest }}"
+    assert steps[digest_index]["env"]["ARCH"] == "${{ matrix.arch }}"
     upload_index = next(
         index for index, step in enumerate(steps) if step.get("uses", "").startswith("actions/upload-artifact@")
     )
     assert build_index < test_index < digest_index < upload_index
 
 
-def test_release_manifests_require_all_native_image_checks():
+@pytest.mark.parametrize("arch, runner", [("amd64", "ubuntu-24.04"), ("arm64", "ubuntu-24.04-arm")])
+def test_each_image_platform_is_built_and_smoke_tested_on_a_native_runner(arch, runner):
     workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    check_native_image_workflow(workflow, arch, runner)
+
+
+def check_release_manifest_workflow(workflow):
     job = workflow["jobs"]["publish-manifests"]
     assert job["needs"] == "build-and-push-image"
     assert job["if"] == "${{ inputs.tag != '' }}"
@@ -84,6 +88,115 @@ def test_release_manifests_require_all_native_image_checks():
     download = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/download-artifact@"))
     assert download["with"]["pattern"] == "digests-${{ matrix.distro }}-*"
     assert download["with"]["merge-multiple"] is True
+    metadata = next(step["with"] for step in job["steps"] if step.get("id") == "meta")
+    rules = [dict(field.split("=", 1) for field in row) for row in csv.reader(metadata["tags"].splitlines())]
+    semver = [rule for rule in rules if rule["type"] == "semver"]
+    assert {rule["pattern"] for rule in semver} == {
+        "{{version}}-${{ matrix.distro }}",
+        "{{major}}.{{minor}}-${{ matrix.distro }}",
+    }
+    assert all(rule["value"] == "${{ inputs.tag }}" and rule["enable"] == "${{ inputs.tag != '' }}" for rule in semver)
+    latest = {rule["value"]: rule["enable"] for rule in rules if rule["type"] == "raw"}
+    assert latest == {
+        "latest-${{ matrix.distro }}": "${{ inputs.tag != '' }}",
+        "latest": "${{ inputs.tag != '' && matrix.distro == 'debian' }}",
+    }
+
+
+def test_release_manifests_require_all_native_image_checks():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    check_release_manifest_workflow(workflow)
+
+
+@pytest.mark.parametrize("field", ["smoke_command", "digest_source", "architecture_source"])
+def test_native_image_guard_rejects_invalid_workflow_commands_and_bindings(field):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    steps = workflow["jobs"]["build-and-push-image"]["steps"]
+    if field == "smoke_command":
+        step = next(step for step in steps if "KEA_EXPORTER_TEST_IMAGE" in step.get("env", {}))
+        step["run"] = "echo tests/test_docker.py"
+    else:
+        step = next(step for step in steps if step.get("id") == "digest")
+        step["env"]["DIGEST" if field == "digest_source" else "ARCH"] = "${{ github.sha }}"
+    with pytest.raises(AssertionError):
+        check_native_image_workflow(workflow, "amd64", "ubuntu-24.04")
+
+
+@pytest.mark.parametrize("field", ["semver_tags", "distro_suffix", "latest_distro"])
+def test_manifest_guard_rejects_incompatible_release_tag_rules(field):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    steps = workflow["jobs"]["publish-manifests"]["steps"]
+    metadata = next(step["with"] for step in steps if step.get("id") == "meta")
+    if field == "semver_tags":
+        metadata["tags"] = "\n".join(line for line in metadata["tags"].splitlines() if "type=semver" not in line)
+    elif field == "distro_suffix":
+        metadata["tags"] = metadata["tags"].replace("-${{ matrix.distro }}", "")
+    else:
+        metadata["tags"] = metadata["tags"].replace("matrix.distro == 'debian'", "matrix.distro == 'alpine'")
+    with pytest.raises(AssertionError):
+        check_release_manifest_workflow(workflow)
+
+
+def remove_test_image(image):
+    found = subprocess.run(
+        ["docker", "image", "ls", "--quiet", "--filter", f"reference={image}"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if found.stdout.strip():
+        subprocess.run(["docker", "image", "rm", image], check=True, capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.skipif(not os.environ.get("KEA_EXPORTER_TEST_REGISTRY"), reason="Set a local test registry to test Docker")
+def test_image_cleanup_preserves_a_build_failure_before_loading(tmp_path):
+    image = f"kea-exporter-cleanup-{uuid4().hex}:test"
+    (tmp_path / "Dockerfile").write_text("FROM scratch\nCOPY missing /missing\n")
+    with pytest.raises(subprocess.CalledProcessError) as failure:
+        try:
+            subprocess.run(
+                ["docker", "build", "--tag", image, str(tmp_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        finally:
+            remove_test_image(image)
+    assert failure.value.cmd[1] == "build", failure.value.stderr
+    assert "missing" in failure.value.stderr
+
+
+@pytest.mark.skipif(not os.environ.get("KEA_EXPORTER_TEST_REGISTRY"), reason="Set a local test registry to test Docker")
+@pytest.mark.parametrize("referenced", [False, True])
+def test_loaded_image_cleanup_preserves_removal_failures(tmp_path, referenced):
+    name = f"kea-exporter-cleanup-{uuid4().hex}"
+    image = f"{name}:test"
+    (tmp_path / "Dockerfile").write_text(f'FROM scratch\nLABEL test-image="{name}"\nCMD ["/missing"]\n')
+    subprocess.run(
+        ["docker", "buildx", "build", "--load", "--tag", image, str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    created = False
+    try:
+        if referenced:
+            subprocess.run(["docker", "create", "--name", name, image], check=True, capture_output=True, timeout=30)
+            created = True
+            with pytest.raises(subprocess.CalledProcessError) as failure:
+                remove_test_image(image)
+            assert failure.value.cmd[1:3] == ["image", "rm"]
+        else:
+            remove_test_image(image)
+            images = subprocess.check_output(["docker", "image", "ls", "--quiet", "--filter", f"reference={image}"])
+            assert not images.strip()
+    finally:
+        if created:
+            subprocess.run(["docker", "rm", name], check=True, capture_output=True, timeout=30)
+        remove_test_image(image)
 
 
 @pytest.mark.skipif(
@@ -146,6 +259,7 @@ def test_release_manifest_publishes_the_loaded_images_for_both_platforms(tmp_pat
                 check=True,
                 timeout=10,
             )
+            remove_test_image(image)
         subprocess.run(["bash", "-e", "-o", "pipefail", "-c", publish], env=environment, check=True, timeout=60)
         manifests = [json.loads(docker("buildx", "imagetools", "inspect", "--raw", tag)) for tag in tags]
         assert all(manifest == manifests[0] for manifest in manifests)
@@ -167,7 +281,10 @@ def test_release_manifest_publishes_the_loaded_images_for_both_platforms(tmp_pat
             )
             assert result.returncode != 0
     finally:
-        docker("image", "rm", image)
+        remove_test_image(image)
+    for tag in tags:
+        retained = json.loads(docker("buildx", "imagetools", "inspect", "--raw", tag))
+        assert retained == manifests[0]
 
 
 @pytest.mark.parametrize("matrix_result", ["success", "failure", "cancelled", "skipped"])

@@ -63,8 +63,10 @@ digests only after all image tests pass.
 
 Set `KEA_EXPORTER_TEST_REGISTRY` to a local test registry to run the publishing
 integration test in `tests/test_ci.py`. The selected Buildx builder must reach
-that registry. This test uploads temporary images and checks the release
-manifest with real Docker commands.
+that registry. This test uploads images and checks the release manifest with
+real Docker commands. It removes loaded local images. Published repositories
+remain in the registry. Use a disposable registry and remove its storage after
+the test.
 
 ## New Features Tested
 
