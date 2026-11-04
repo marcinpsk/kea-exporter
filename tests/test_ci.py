@@ -95,8 +95,12 @@ def check_release_manifest_workflow(workflow):
     publish = next(step for step in job["steps"] if step.get("name") == "Publish the multi-platform image")
     assert "if" not in publish
     assert "continue-on-error" not in publish
-    assert ["docker", "buildx", "imagetools", "create", "${arguments[@]}"] in [
-        shlex.split(line) for line in publish["run"].splitlines()
+    assert shlex.split(publish["run"].strip().splitlines()[-1]) == [
+        "docker",
+        "buildx",
+        "imagetools",
+        "create",
+        "${arguments[@]}",
     ]
     metadata = next(step["with"] for step in job["steps"] if step.get("id") == "meta")
     rules = [dict(field.split("=", 1) for field in row) for row in csv.reader(metadata["tags"].splitlines())]
@@ -152,6 +156,7 @@ def test_native_image_guard_rejects_invalid_workflow_commands_and_bindings(field
         "publish_continue",
         "publish_command",
         "echoed_publish_command",
+        "conditional_publish_command",
     ],
 )
 def test_manifest_guard_rejects_incompatible_release_tag_rules(field):
@@ -170,22 +175,42 @@ def test_manifest_guard_rejects_incompatible_release_tag_rules(field):
             publish["if"] = False
         elif field == "publish_continue":
             publish["continue-on-error"] = True
+        elif field == "conditional_publish_command":
+            publish["run"] = publish["run"].replace(
+                'docker buildx imagetools create "${arguments[@]}"',
+                'if false; then\n  docker buildx imagetools create "${arguments[@]}"\nfi',
+            )
         else:
             publish["run"] = "echo docker buildx imagetools create" if field == "echoed_publish_command" else "true"
     with pytest.raises(AssertionError):
         check_release_manifest_workflow(workflow)
 
 
-def test_tagged_build_tests_its_registry_digest():
-    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+def check_tagged_image_workflow(workflow):
     steps = workflow["jobs"]["build-and-push-image"]["steps"]
     build = next(step["with"] for step in steps if step.get("id") == "build")
     smoke = next(step for step in steps if "KEA_EXPORTER_TEST_IMAGE" in step.get("env", {}))
     assert build["load"] == "${{ inputs.tag == '' }}"
+    outputs = dict(field.split("=", 1) for field in next(csv.reader([build["outputs"]])))
+    assert outputs["push"] == "${{ inputs.tag != '' }}"
     assert smoke["env"]["KEA_EXPORTER_TEST_IMAGE"] == (
         "${{ inputs.tag != '' && format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.build.outputs.digest) "
         "|| format('{0}/{1}', env.REGISTRY, env.IMAGE_NAME) }}"
     )
+
+
+def test_tagged_build_tests_its_registry_digest():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    check_tagged_image_workflow(workflow)
+
+
+def test_tagged_image_guard_rejects_disabled_registry_push():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    steps = workflow["jobs"]["build-and-push-image"]["steps"]
+    build = next(step["with"] for step in steps if step.get("id") == "build")
+    build["outputs"] = build["outputs"].replace("push=${{ inputs.tag != '' }}", "push=false")
+    with pytest.raises(AssertionError):
+        check_tagged_image_workflow(workflow)
 
 
 @pytest.mark.parametrize(
