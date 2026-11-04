@@ -1,0 +1,9 @@
+*
+!pyproject.toml
+!uv.lock
+!README.rst
+!LICENSE
+!kea_exporter/
+!kea_exporter/**
+**/__pycache__/
+**/*.py[cod]

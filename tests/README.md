@@ -46,6 +46,28 @@ uv run pytest -v
 uv run pytest --cov --cov-report=term-missing --cov-fail-under=80
 ```
 
+### Test a Docker image
+
+The Docker smoke tests require a Linux Docker host. They check the installed
+packages, CLI, and a real Kea-to-Prometheus scrape with a read-only filesystem.
+CI runs these tests for both images before publication.
+
+```bash
+docker build -f Dockerfile.debian -t kea-exporter-smoke:debian .
+KEA_EXPORTER_TEST_IMAGE=kea-exporter-smoke:debian uv run -- pytest tests/test_docker.py
+```
+
+CI builds and tests each image on a standard native GitHub runner: `ubuntu-24.04`
+for amd64 and `ubuntu-24.04-arm` for ARM64. Release tags combine the two image
+digests only after all image tests pass.
+
+Set `KEA_EXPORTER_TEST_REGISTRY` to a local test registry to run the publishing
+integration test in `tests/test_ci.py`. The selected Buildx builder must reach
+that registry. This test uploads images and checks the release manifest with
+real Docker commands. It removes loaded local images. Published repositories
+remain in the registry. Use a disposable registry and remove its storage after
+the test.
+
 ## New Features Tested
 
 The tests extensively cover the new features introduced in this branch:
