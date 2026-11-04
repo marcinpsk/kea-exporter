@@ -1,5 +1,6 @@
 """Exercise the lint tools against workflows and dependency files."""
 
+import ast
 import csv
 import json
 import os
@@ -61,13 +62,12 @@ def check_native_image_workflow(workflow, arch, runner):
     assert len(builds) == 1, "Build each native image once, and load it for runtime smoke tests"
     build_index, build = builds[0]
     assert build["platforms"] == "linux/${{ matrix.arch }}"
-    assert build["load"] is True
+    assert build["load"] == "${{ inputs.tag == '' }}"
     assert "${{ matrix.arch }}" in build["cache-to"]
-    test_index = next(
-        index for index, step in enumerate(steps) if step.get("env", {}).get("KEA_EXPORTER_TEST_IMAGE") == build["tags"]
-    )
+    test_index = next(index for index, step in enumerate(steps) if "KEA_EXPORTER_TEST_IMAGE" in step.get("env", {}))
     assert steps[test_index]["run"].strip() == "uv run --frozen -- pytest -q tests/test_docker.py"
     assert "if" not in steps[test_index]
+    assert "continue-on-error" not in steps[test_index]
     assert steps[test_index]["env"]["KEA_EXPORTER_TEST_PLATFORM"] == build["platforms"]
     digest_index = next(index for index, step in enumerate(steps) if step.get("id") == "digest")
     assert steps[digest_index]["env"]["DIGEST"] == "${{ steps.build.outputs.digest }}"
@@ -94,6 +94,10 @@ def check_release_manifest_workflow(workflow):
     assert download["with"]["merge-multiple"] is True
     publish = next(step for step in job["steps"] if step.get("name") == "Publish the multi-platform image")
     assert "if" not in publish
+    assert "continue-on-error" not in publish
+    assert ["docker", "buildx", "imagetools", "create", "${arguments[@]}"] in [
+        shlex.split(line) for line in publish["run"].splitlines()
+    ]
     metadata = next(step["with"] for step in job["steps"] if step.get("id") == "meta")
     rules = [dict(field.split("=", 1) for field in row) for row in csv.reader(metadata["tags"].splitlines())]
     semver = [rule for rule in rules if rule["type"] == "semver"]
@@ -115,19 +119,22 @@ def test_release_manifests_require_all_native_image_checks():
 
 
 @pytest.mark.parametrize(
-    "field", ["smoke_command", "digest_source", "architecture_source", "distro_matrix", "smoke_condition"]
+    "field",
+    ["smoke_command", "digest_source", "architecture_source", "distro_matrix", "smoke_condition", "smoke_continue"],
 )
 def test_native_image_guard_rejects_invalid_workflow_commands_and_bindings(field):
     workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
     steps = workflow["jobs"]["build-and-push-image"]["steps"]
     if field == "distro_matrix":
         workflow["jobs"]["build-and-push-image"]["strategy"]["matrix"]["distro"] = ["debian"]
-    elif field in {"smoke_command", "smoke_condition"}:
+    elif field in {"smoke_command", "smoke_condition", "smoke_continue"}:
         step = next(step for step in steps if "KEA_EXPORTER_TEST_IMAGE" in step.get("env", {}))
         if field == "smoke_command":
             step["run"] = "echo tests/test_docker.py"
-        else:
+        elif field == "smoke_condition":
             step["if"] = False
+        else:
+            step["continue-on-error"] = True
     else:
         step = next(step for step in steps if step.get("id") == "digest")
         step["env"]["DIGEST" if field == "digest_source" else "ARCH"] = "${{ github.sha }}"
@@ -135,7 +142,18 @@ def test_native_image_guard_rejects_invalid_workflow_commands_and_bindings(field
         check_native_image_workflow(workflow, "amd64", "ubuntu-24.04")
 
 
-@pytest.mark.parametrize("field", ["semver_tags", "distro_suffix", "latest_distro", "publish_condition"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "semver_tags",
+        "distro_suffix",
+        "latest_distro",
+        "publish_condition",
+        "publish_continue",
+        "publish_command",
+        "echoed_publish_command",
+    ],
+)
 def test_manifest_guard_rejects_incompatible_release_tag_rules(field):
     workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
     steps = workflow["jobs"]["publish-manifests"]["steps"]
@@ -148,9 +166,51 @@ def test_manifest_guard_rejects_incompatible_release_tag_rules(field):
         metadata["tags"] = metadata["tags"].replace("matrix.distro == 'debian'", "matrix.distro == 'alpine'")
     else:
         publish = next(step for step in steps if step.get("name") == "Publish the multi-platform image")
-        publish["if"] = False
+        if field == "publish_condition":
+            publish["if"] = False
+        elif field == "publish_continue":
+            publish["continue-on-error"] = True
+        else:
+            publish["run"] = "echo docker buildx imagetools create" if field == "echoed_publish_command" else "true"
     with pytest.raises(AssertionError):
         check_release_manifest_workflow(workflow)
+
+
+def test_tagged_build_tests_its_registry_digest():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    steps = workflow["jobs"]["build-and-push-image"]["steps"]
+    build = next(step["with"] for step in steps if step.get("id") == "build")
+    smoke = next(step for step in steps if "KEA_EXPORTER_TEST_IMAGE" in step.get("env", {}))
+    assert build["load"] == "${{ inputs.tag == '' }}"
+    assert smoke["env"]["KEA_EXPORTER_TEST_IMAGE"] == (
+        "${{ inputs.tag != '' && format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.build.outputs.digest) "
+        "|| format('{0}/{1}', env.REGISTRY, env.IMAGE_NAME) }}"
+    )
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        "remove_test_image",
+        "docker_daemon",
+        "test_image_cleanup_preserves_a_build_failure_before_loading",
+        "test_loaded_image_cleanup_preserves_removal_failures",
+        "test_cleanup_coverage_depends_on_docker_not_the_registry",
+    ],
+)
+def test_cleanup_commands_bound_operations_instead_of_the_nested_suite(function):
+    tree = ast.parse(Path(__file__).read_text())
+    target = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == function)
+    for call in ast.walk(target):
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+            continue
+        if not isinstance(call.func.value, ast.Name) or call.func.value.id != "subprocess":
+            continue
+        timeouts = [keyword.value for keyword in call.keywords if keyword.arg == "timeout"]
+        if function == "test_cleanup_coverage_depends_on_docker_not_the_registry":
+            assert not timeouts, "The nested pytest run must allow its bounded Docker operations to finish"
+        else:
+            assert len(timeouts) == 1 and isinstance(timeouts[0], ast.Constant) and timeouts[0].value > 0
 
 
 def remove_test_image(image):
@@ -199,7 +259,6 @@ def test_cleanup_coverage_depends_on_docker_not_the_registry(tmp_path, availabil
         env=environment,
         capture_output=True,
         text=True,
-        timeout=45,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     suite = ET.parse(report).getroot().find("testsuite")
@@ -249,7 +308,9 @@ def test_loaded_image_cleanup_preserves_removal_failures(tmp_path, referenced):
             assert failure.value.cmd[1:3] == ["image", "rm"]
         else:
             remove_test_image(image)
-            images = subprocess.check_output(["docker", "image", "ls", "--quiet", "--filter", f"reference={image}"])
+            images = subprocess.check_output(
+                ["docker", "image", "ls", "--quiet", "--filter", f"reference={image}"], timeout=30
+            )
             assert not images.strip()
     finally:
         if created:
@@ -260,7 +321,8 @@ def test_loaded_image_cleanup_preserves_removal_failures(tmp_path, referenced):
 @pytest.mark.skipif(
     not os.environ.get("KEA_EXPORTER_TEST_REGISTRY"), reason="Set a local test registry to test publishing"
 )
-def test_release_manifest_publishes_the_loaded_images_for_both_platforms(tmp_path):
+@pytest.mark.parametrize("oci_media_types", [False, True])
+def test_release_manifest_publishes_the_tested_registry_images_for_both_platforms(tmp_path, oci_media_types):
     workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
     steps = workflow["jobs"]["build-and-push-image"]["steps"]
     build = next(step["with"] for step in steps if step.get("id") == "build")
@@ -295,19 +357,23 @@ def test_release_manifest_publishes_the_loaded_images_for_both_platforms(tmp_pat
                 "build",
                 "--platform",
                 build["platforms"].replace("${{ matrix.arch }}", arch),
-                "--load",
                 "--tag",
                 image,
                 "--provenance=false",
                 "--metadata-file",
                 "metadata.json",
                 "--output",
-                build["outputs"].replace("${{ inputs.tag != '' }}", "true"),
+                build["outputs"].replace("${{ inputs.tag != '' }}", "true")
+                + f",oci-mediatypes={str(oci_media_types).lower()}",
                 ".",
             )
             digest = json.loads((tmp_path / "metadata.json").read_text())["containerimage.digest"]
-            loaded = json.loads(docker("image", "inspect", image))[0]
-            uploaded = json.loads(docker("buildx", "imagetools", "inspect", "--raw", f"{image}@{digest}"))
+            reference = f"{image}@{digest}"
+            docker("pull", reference)
+            # Give the owned pull a local tag so the same cleanup covers both export modes.
+            docker("tag", reference, image)
+            loaded = json.loads(docker("image", "inspect", reference))[0]
+            uploaded = json.loads(docker("buildx", "imagetools", "inspect", "--raw", reference))
             assert uploaded["config"]["digest"] == loaded["Id"]
             assert loaded["Architecture"] == arch
             digests.add(digest)

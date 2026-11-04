@@ -71,7 +71,7 @@ jobs:
           context: .
           file: Dockerfile.${{ matrix.distro }}
           platforms: linux/${{ matrix.arch }}
-          load: true
+          load: ${{ inputs.tag == '' }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
@@ -82,7 +82,7 @@ jobs:
 
       - name: Test ${{ matrix.distro }} ${{ matrix.arch }} image
         env:
-          KEA_EXPORTER_TEST_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          KEA_EXPORTER_TEST_IMAGE: ${{ inputs.tag != '' && format('{0}/{1}@{2}', env.REGISTRY, env.IMAGE_NAME, steps.build.outputs.digest) || format('{0}/{1}', env.REGISTRY, env.IMAGE_NAME) }}
           KEA_EXPORTER_TEST_PLATFORM: linux/${{ matrix.arch }}
         run: uv run --frozen -- pytest -q tests/test_docker.py
 
