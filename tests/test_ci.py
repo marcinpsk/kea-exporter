@@ -49,12 +49,16 @@ def copy_toolchain_files(destination):
     shutil.copytree(ROOT / "scripts", destination / "scripts")
 
 
-@pytest.mark.parametrize("pin", ["0.99.1", "latest", None, "duplicate"])
+@pytest.mark.parametrize("pin", ["0.99.1", "latest", None, "duplicate", "mixed_duplicate", "mixed_duplicate_first"])
 def test_release_installs_the_uv_version_from_the_debian_dockerfile(tmp_path, pin):
     copy_toolchain_files(tmp_path)
     stage = f"FROM ghcr.io/astral-sh/uv:{pin} AS uv\n" if pin is not None else ""
     if pin == "duplicate":
         stage = "FROM ghcr.io/astral-sh/uv:0.99.1 AS uv\n" * 2
+    elif pin == "mixed_duplicate":
+        stage = "FROM ghcr.io/astral-sh/uv:0.99.1 AS uv\nFROM ghcr.io/astral-sh/uv:latest AS uv\n"
+    elif pin == "mixed_duplicate_first":
+        stage = "FROM ghcr.io/astral-sh/uv:latest AS uv\nFROM ghcr.io/astral-sh/uv:0.99.1 AS uv\n"
     (tmp_path / "Dockerfile.debian").write_text(stage + "FROM python:3.15-slim AS base\n")
     executables = tmp_path / "bin"
     executables.mkdir()
@@ -125,7 +129,16 @@ def test_docker_workflow_reads_both_versions_from_the_selected_dockerfile(tmp_pa
     assert dict(line.split("=", 1) for line in output.read_text().splitlines()) == {"uv": "0.99.2", "python": "3.16"}
 
 
-@pytest.mark.parametrize("python_stage", ["", "FROM python:latest AS base\n", "FROM python:3.16-slim AS base\n" * 2])
+@pytest.mark.parametrize(
+    "python_stage",
+    [
+        "",
+        "FROM python:latest AS base\n",
+        "FROM python:3.16-slim AS base\n" * 2,
+        "FROM python:3.16-slim AS base\nFROM python:latest AS base\n",
+        "FROM python:latest AS base\nFROM python:3.16-slim AS base\n",
+    ],
+)
 def test_docker_workflow_rejects_an_invalid_python_pin_before_exporting_versions(tmp_path, python_stage):
     copy_toolchain_files(tmp_path)
     (tmp_path / "Dockerfile.debian").write_text("FROM ghcr.io/astral-sh/uv:0.99.2 AS uv\n" + python_stage)

@@ -18,10 +18,16 @@ def main():
         content = arguments.dockerfile.read_text()
     except OSError as error:
         parser.error(str(error))
-    versions = re.findall(patterns[arguments.tool], content, re.MULTILINE)
-    if len(versions) != 1:
+    stage = "uv" if arguments.tool == "uv" else "base"
+    declarations = re.findall(
+        rf"^[ \t]*FROM[ \t]+[^\n]+[ \t]+AS[ \t]+{stage}[ \t]*$",
+        content,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    version = re.fullmatch(patterns[arguments.tool], declarations[0]) if len(declarations) == 1 else None
+    if version is None:
         parser.error(f"Expected one pinned {arguments.tool} stage in {arguments.dockerfile}")
-    print(versions[0])
+    print(version.group(1))
 
 
 if __name__ == "__main__":
