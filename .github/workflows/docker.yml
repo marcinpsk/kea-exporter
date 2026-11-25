@@ -59,10 +59,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
+      - name: Read Docker toolchain versions
+        id: docker-versions
+        env:
+          DOCKERFILE: Dockerfile.${{ matrix.distro }}
+        run: |
+          uv_version=$(python3 scripts/docker-version.py uv "$DOCKERFILE")
+          python_version=$(python3 scripts/docker-version.py python "$DOCKERFILE")
+          printf 'uv=%s\npython=%s\n' "$uv_version" "$python_version" >> "$GITHUB_OUTPUT"
+
       - name: Set up uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          python-version: '3.14'
+          version: ${{ steps.docker-versions.outputs.uv }}
+          python-version: ${{ steps.docker-versions.outputs.python }}
 
       - name: Build ${{ matrix.distro }} ${{ matrix.arch }} image
         id: build

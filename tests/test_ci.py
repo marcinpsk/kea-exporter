@@ -22,27 +22,143 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.mark.parametrize("dockerfile", ["Dockerfile.alpine", "Dockerfile.debian"])
-def test_release_uv_matches_the_docker_lockfile_reader(dockerfile):
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    image_versions = re.findall(r"^FROM ghcr\.io/astral-sh/uv:([\d.]+) AS uv$", (ROOT / dockerfile).read_text(), re.M)
-    assert len(image_versions) == 1
-    command = shlex.split(project["tool"]["semantic_release"]["build_command"])
-    assert f"uv=={image_versions[0]}" in command, "Pin the release lockfile writer to the Docker uv version"
-
-
-@pytest.mark.parametrize("dockerfile", ["Dockerfile.alpine", "Dockerfile.debian"])
-def test_docker_python_matches_project_support_and_smoke_tests(dockerfile):
+def test_docker_python_is_supported_by_the_project(dockerfile):
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     versions = re.findall(r"^FROM python:([\d.]+)-\S+ AS base$", (ROOT / dockerfile).read_text(), re.M)
     assert len(versions) == 1
     assert versions[0] in SpecifierSet(project["project"]["requires-python"])
-    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
-    setup_uv = next(
-        step
-        for step in workflow["jobs"]["build-and-push-image"]["steps"]
-        if step.get("uses", "").startswith("astral-sh/setup-uv@")
+
+
+def test_both_docker_images_use_the_same_uv_version():
+    versions = []
+    for dockerfile in ("Dockerfile.alpine", "Dockerfile.debian"):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/docker-version.py"), "uv", str(ROOT / dockerfile)],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        versions.append(result.stdout.strip())
+    assert versions[0] == versions[1], "Both Docker builds must use the release lockfile writer's uv version"
+
+
+def copy_toolchain_files(destination):
+    for dockerfile in ("Dockerfile.alpine", "Dockerfile.debian"):
+        shutil.copy(ROOT / dockerfile, destination)
+    shutil.copytree(ROOT / "scripts", destination / "scripts")
+
+
+@pytest.mark.parametrize("pin", ["0.99.1", "latest", None, "duplicate", "mixed_duplicate", "mixed_duplicate_first"])
+def test_release_installs_the_uv_version_from_the_debian_dockerfile(tmp_path, pin):
+    copy_toolchain_files(tmp_path)
+    stage = f"FROM ghcr.io/astral-sh/uv:{pin} AS uv\n" if pin is not None else ""
+    if pin == "duplicate":
+        stage = "FROM ghcr.io/astral-sh/uv:0.99.1 AS uv\n" * 2
+    elif pin == "mixed_duplicate":
+        stage = "FROM ghcr.io/astral-sh/uv:0.99.1 AS uv\nFROM ghcr.io/astral-sh/uv:latest AS uv\n"
+    elif pin == "mixed_duplicate_first":
+        stage = "FROM ghcr.io/astral-sh/uv:latest AS uv\nFROM ghcr.io/astral-sh/uv:0.99.1 AS uv\n"
+    (tmp_path / "Dockerfile.debian").write_text(stage + "FROM python:3.15-slim AS base\n")
+    executables = tmp_path / "bin"
+    executables.mkdir()
+    recorder = executables / "record-command"
+    recorder.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "with open(os.environ['COMMAND_LOG'], 'a') as log:\n"
+        "    log.write(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]]) + '\\n')\n"
     )
-    assert setup_uv["with"]["python-version"] == versions[0]
+    recorder.chmod(0o755)
+    for command in ("pip", "uv"):
+        (executables / command).symlink_to(recorder)
+    (executables / "python").symlink_to(sys.executable)
+    log = tmp_path / "commands.jsonl"
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", project["tool"]["semantic_release"]["build_command"]],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{executables}:{os.environ['PATH']}", "COMMAND_LOG": str(log)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    if pin != "0.99.1":
+        assert result.returncode != 0
+        assert "Expected one pinned uv stage" in result.stderr
+        assert not log.exists(), "Do not install or build after version extraction fails"
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [json.loads(line) for line in log.read_text().splitlines()] == [
+        ["pip", "install", "uv==0.99.1"],
+        ["uv", "lock"],
+        ["uv", "build"],
+    ]
+
+
+@pytest.mark.parametrize("distro", ["alpine", "debian"])
+def test_docker_workflow_reads_both_versions_from_the_selected_dockerfile(tmp_path, distro):
+    copy_toolchain_files(tmp_path)
+    (tmp_path / f"Dockerfile.{distro}").write_text(
+        f"FROM ghcr.io/astral-sh/uv:0.99.2 AS uv\nFROM python:3.16-{distro} AS base\n"
+    )
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    steps = workflow["jobs"]["build-and-push-image"]["steps"]
+    versions = next((step for step in steps if step.get("id") == "docker-versions"), None)
+    assert versions is not None, "Read the toolchain versions before setting up uv"
+    setup_uv = next(step for step in steps if step.get("uses", "").startswith("astral-sh/setup-uv@"))
+    assert steps.index(versions) < steps.index(setup_uv)
+    assert versions["env"]["DOCKERFILE"] == "Dockerfile.${{ matrix.distro }}"
+    assert setup_uv["with"]["version"] == "${{ steps.docker-versions.outputs.uv }}"
+    assert setup_uv["with"]["python-version"] == "${{ steps.docker-versions.outputs.python }}"
+    output = tmp_path / "outputs"
+
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", versions["run"]],
+        cwd=tmp_path,
+        env={**os.environ, "DOCKERFILE": f"Dockerfile.{distro}", "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert dict(line.split("=", 1) for line in output.read_text().splitlines()) == {"uv": "0.99.2", "python": "3.16"}
+
+
+@pytest.mark.parametrize(
+    "python_stage",
+    [
+        "",
+        "FROM python:latest AS base\n",
+        "FROM python:3.16-slim AS base\n" * 2,
+        "FROM python:3.16-slim AS base\nFROM python:latest AS base\n",
+        "FROM python:latest AS base\nFROM python:3.16-slim AS base\n",
+    ],
+)
+def test_docker_workflow_rejects_an_invalid_python_pin_before_exporting_versions(tmp_path, python_stage):
+    copy_toolchain_files(tmp_path)
+    (tmp_path / "Dockerfile.debian").write_text("FROM ghcr.io/astral-sh/uv:0.99.2 AS uv\n" + python_stage)
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker.yml").read_text())
+    steps = workflow["jobs"]["build-and-push-image"]["steps"]
+    versions = next(step for step in steps if step.get("id") == "docker-versions")
+    output = tmp_path / "outputs"
+
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", versions["run"]],
+        cwd=tmp_path,
+        env={**os.environ, "DOCKERFILE": "Dockerfile.debian", "GITHUB_OUTPUT": str(output)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "Expected one pinned python stage" in result.stderr
+    assert not output.exists(), "Do not export partial toolchain versions"
 
 
 def check_native_image_workflow(workflow, arch, runner):
